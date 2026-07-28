@@ -406,7 +406,7 @@ body.is-readonly .btn--primary, body.is-readonly .btn--danger, body.is-readonly 
 body.is-readonly #ad_addph, body.is-readonly #ad_save, body.is-readonly #ad_saveCal,
 body.is-readonly #ad_demo, body.is-readonly #ad_vide, body.is-readonly #ad_imp, body.is-readonly #btnImport,
 body.is-readonly #ct_edit, body.is-readonly #st_ed, body.is-readonly #btnResetDispo,
-body.is-readonly #btnImpAct, body.is-readonly #btnNewSec{display:none!important}
+body.is-readonly #btnImpAct, body.is-readonly #btnNewSec, body.is-readonly #btnImpWbs{display:none!important}
 body.is-readonly .chk, body.is-readonly .cell{pointer-events:none;opacity:.55}
 body.is-readonly .bar__grip{display:none}
 
@@ -419,6 +419,21 @@ body.is-readonly .bar__grip{display:none}
 .cf-m{font-size:10.5px;color:var(--ink-3);margin-top:4px}
 .cf-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:8px}
 
+
+.bu-chart{display:block;max-width:820px;margin:0 auto}
+.bu-legend{display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin-top:8px;font-size:12px;color:var(--ink-2)}
+.bu-legend i.bl{display:inline-block;width:14px;height:3px;border-radius:2px;margin-right:5px;vertical-align:middle}
+.bl--real{background:#2547C8}
+.bl--fut{background:#2547C8;opacity:.5}
+.bl--ov{background:#8A5A12}
+
+.mplan{position:relative;height:13px;background:var(--surface-2);border:1px solid var(--line-soft);border-radius:6px;min-width:120px}
+.mplan i{position:absolute;top:1px;height:9px;border-radius:4px;opacity:.9}
+.mplan-today{position:absolute;top:-1px;bottom:-1px;width:1px;background:var(--danger);opacity:.5}
+tr.lvl td{background:rgba(20,30,60,.02)}
+.g-row.is-archived{opacity:.5}
+.g-row.is-archived .g-name{text-decoration:line-through}
+.g-row.is-archived .bar,.g-row.is-archived .ms{filter:grayscale(.5)}
 @media(max-width:860px){.usedby{grid-template-columns:1fr}}
 
 @media(max-width:860px){
@@ -480,7 +495,7 @@ body.is-readonly .bar__grip{display:none}
   // (Project Settings -> API Keys). Ne jamais mettre la cle secret ici.
   window.SUPABASE_CONFIG = {
     url: "https://pzbbdclhdxlmohtmpgnr.supabase.co",
-    key: "sb_publishable_KFwSU3xqxmENnlXKCvqPdQ_tUrG5_Lj"
+    key: "REMPLACER_PAR_LA_CLE_PUBLISHABLE"
   };
 </script>
 <script>
@@ -1037,7 +1052,7 @@ function seed(){
       description:'Remplacement de l\'ERP historique sur les domaines Finance, Achats et Supply Chain.'},
     params:{joursOuvres:[1,2,3,4,5],feries:['2026-01-01','2026-05-01','2026-07-14','2026-12-25','2027-01-01','2027-05-01','2027-12-25','2028-01-01'],
       zoom:'mois',devise:'€',seuilSurcharge:100},
-    phases:ph, taches:T, acteurs:ac, dispos:{}, absences:[], sections, actions,
+    phases:ph, taches:T, acteurs:ac, dispos:{}, chargePrevue:{}, tarifMensuel:{}, absences:[], sections, actions,
     systemes, domaines, processus, transformations, formations,
     ...seedExtra(A, domaines)
   };
@@ -1060,7 +1075,7 @@ function normalizeStamps(){
   const baseISO = new Date(base+'T09:00:00').toISOString();
   ['taches','actions','acteurs','systemes','domaines','processus','transformations','formations',
    'commGroupes','evenements','regles','budget','realisation','demandes','documents','attendus',
-   'roles','boutEnBout','planBascule','bascule','repetitions','photos','donnees','campagnes'].forEach(k=>{
+   'roles','boutEnBout','planBascule','bascule','repetitions','photos','donnees','campagnes','budgetVersions'].forEach(k=>{
     (state[k]||[]).forEach(o=>{ if(!o.creeLe) o.creeLe=base; if(!o.maj) o.maj=baseISO;
       if(k==='donnees'){ (o.champs||[]).forEach(c=>{ if(!c.maj) c.maj=baseISO; }); }
       if(k==='campagnes'){ (o.tests||[]).forEach(t=>{ if(!t.maj) t.maj=baseISO; }); } });
@@ -1070,7 +1085,7 @@ function migrer(){
   const s = seed();
   ['systemes','domaines','processus','transformations','formations','sections','absences',
    'commGroupes','evenements','regles','budget','realisation','demandes','documents','attendus',
-   'roles','boutEnBout','planBascule','bascule','repetitions','photos','donnees','campagnes'].forEach(k=>{
+   'roles','boutEnBout','planBascule','bascule','repetitions','photos','donnees','campagnes','budgetVersions'].forEach(k=>{
     if(!Array.isArray(state[k])) state[k]=s[k];
   });
   if(!state.charte) state.charte=s.charte;
@@ -1228,8 +1243,8 @@ async function deleteEntities(coll, ids, extra, okMsg){
    ============================================================ */
 const CLOUD_COLLS = ['phases','taches','acteurs','absences','sections','actions','systemes','domaines',
   'processus','transformations','formations','commGroupes','evenements','regles','budget','realisation',
-  'demandes','documents','attendus','roles','boutEnBout','planBascule','bascule','repetitions','donnees','campagnes','photos'];
-const CLOUD_SINGLES = ['projet','params','charte','testStrategie','dispos'];
+  'demandes','documents','attendus','roles','boutEnBout','planBascule','bascule','repetitions','donnees','campagnes','photos','budgetVersions','feedback'];
+const CLOUD_SINGLES = ['projet','params','charte','testStrategie','dispos','chargePrevue','tarifMensuel'];
 function cloudEnabled(){ const c=window.SUPABASE_CONFIG||{}; return !!(c.url && c.key && c.key!=='REMPLACER_PAR_LA_CLE_PUBLISHABLE'); }
 function persistSingleton(key){
   if(state[key]===undefined) return;
@@ -1396,13 +1411,13 @@ const ICONS = {
 };
 const VUES = [
   {id:'dashboard',g:'Pilotage',nom:'Vue d\'ensemble',titre:'Vue d\'ensemble'},
+  {id:'contrat',  g:'Pilotage',nom:'Contrat projet',titre:'Contrat projet — charte et règles de fonctionnement'},
   {id:'gantt',    g:'Pilotage',nom:'Gantt & WBS',titre:'Gantt — décomposition par phase'},
   {id:'plan',     g:'Pilotage',nom:'Plan d\'action',titre:'Plan d\'action et suivi des tâches'},
-  {id:'comm',     g:'Pilotage',nom:'Communication projet',titre:'Communication projet'},
+  {id:'comm',     g:'Pilotage',nom:'Communication projet -Bêta',titre:'Communication projet'},
   {id:'budget',   g:'Pilotage',nom:'Gestion budgétaire',titre:'Gestion budgétaire'},
   {id:'acteurs',  g:'Pilotage',nom:'Acteurs projet',titre:'Acteurs projet'},
-  {id:'dispo',    g:'Pilotage',nom:'Disponibilités',titre:'Disponibilités et plan de charge'},
-  {id:'contrat',  g:'Pilotage',nom:'Contrat projet',titre:'Contrat projet — charte et règles de fonctionnement'},
+  {id:'dispo',    g:'Pilotage',nom:'Disponibilités -Bêta',titre:'Disponibilités et plan de charge'},
   {id:'admin',    g:'Pilotage',nom:'Administration',titre:'Administration et paramètres généraux'},
   {id:'tdb',      g:'Tableau de bord',nom:'Mes éléments',titre:'Tableau de bord — éléments attribués'},
   {id:'perimetre',g:'Solution',nom:'Définition du périmètre',titre:'Définition du périmètre — processus'},
@@ -1418,11 +1433,13 @@ const VUES = [
   {id:'donnees',  g:'Modèle de données',nom:'Liste de données',titre:'Modèle de données'},
   {id:'bascule',  g:'Préparation bascule',nom:'Actions par donnée',titre:'Préparation de la bascule — actions par donnée'},
   {id:'planbascule',g:'Préparation bascule',nom:'Plan de bascule',titre:'Plan de bascule'},
-  {id:'repetitions',g:'Préparation bascule',nom:'Répétitions',titre:'Répétitions de bascule'}
+  {id:'repetitions',g:'Préparation bascule',nom:'Répétitions',titre:'Répétitions de bascule'},
+  {id:'feedback', g:'Contribuer',nom:'Proposer une amélioration',titre:'Proposer une amélioration ou signaler un bug'}
 ];
 const navOpen = new Set();
 let vue = 'dashboard';
 
+const BETA_GROUPES = new Set(['Solution','Sécurité fonctionnelle','Préparation des utilisateurs','Modèle de données','Préparation bascule']);
 function buildNav(){
   const groupes=[...new Set(VUES.map(v=>v.g))];
   const gActive=(VUES.find(v=>v.id===vue)||{}).g;
@@ -1430,7 +1447,7 @@ function buildNav(){
   $('#nav').innerHTML = groupes.map(g=>{
     const ouvert=navOpen.has(g);
     return `<div class="navgroup${ouvert?' is-open':''}" data-grp="${esc(g)}">
-      <button class="navgroup__h" data-toggle="${esc(g)}"><span>${esc(g)}</span><span class="chev">${ouvert?'▾':'▸'}</span></button>
+      <button class="navgroup__h" data-toggle="${esc(g)}"><span>${esc(g)}${BETA_GROUPES.has(g)?' -Bêta':''}</span><span class="chev">${ouvert?'▾':'▸'}</span></button>
       <div class="navgroup__items">${VUES.filter(v=>v.g===g).map(v=>
         `<button class="navitem${v.id===vue?' is-active':''}" data-vue="${v.id}">${ICONS[v.id]||ICONS._def}<span>${v.nom}</span></button>`).join('')}</div></div>`;
   }).join('');
@@ -1450,7 +1467,7 @@ function go(id){
   VUES.forEach(v=>$('#view-'+v.id).classList.toggle('hidden', v.id!==id));
   const v = VUES.find(v=>v.id===id);
   $('#pageTitle').textContent = v.titre;
-  $('#pageGroup').textContent = v.g;
+  $('#pageGroup').textContent = v.g + (BETA_GROUPES.has(v.g)?' -Bêta':'');
   $('#pageTools').innerHTML = '';
   render();
 }
@@ -1464,13 +1481,59 @@ function render(){
     admin:renderAdmin,perimetre:renderPerimetre,transfo:renderTransfo,formation:renderFormation,
     comm:renderComm,budget:renderBudget,contrat:renderContrat,tdb:renderTDB,cible:renderCible,real:renderReal,
     demandes:renderDemandes,vunit:renderVUnit,vcomplete:renderVComplete,roles:renderRoles,planform:renderPlanForm,
-    donnees:renderDonnees,bascule:renderBascule,planbascule:renderPlanBascule,repetitions:renderRepetitions})[vue]||(()=>{}))();
+    donnees:renderDonnees,bascule:renderBascule,planbascule:renderPlanBascule,repetitions:renderRepetitions,feedback:renderFeedback})[vue]||(()=>{}))();
 }
 function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1800); }
 
 /* ============================================================
    VUE D'ENSEMBLE
    ============================================================ */
+let dashDetail=1;
+function miniPlan(debut, fin, color){
+  if(!debut||!fin) return '<div class="mplan"></div>';
+  const h=horizon(), tot=Math.max(1,diffDays(h.debut,h.fin));
+  let left=Math.max(0,Math.min(100, diffDays(h.debut,debut)/tot*100));
+  let w=Math.max(1.5,Math.min(100-left, diffDays(debut,fin)/tot*100));
+  const tdy=Math.max(0,Math.min(100, diffDays(h.debut,today())/tot*100));
+  return `<div class="mplan" title="${fmtFR(debut)} → ${fmtFR(fin)}"><span class="mplan-today" style="left:${tdy}%"></span><i style="left:${left}%;width:${w}%;background:${color}"></i></div>`;
+}
+function noeudInfo(t){
+  const leaves = estParent(t.id)? descendants(t.id).filter(x=>!estParent(x.id)&&x.type!=='jalon') : (t.type!=='jalon'?[t]:[]);
+  if(!leaves.length) return {debut:t.debut, fin:t.fin, avancement:t.avancement||0, charge:0};
+  const debut=leaves.reduce((m,x)=>(!m||x.debut<m)?x.debut:m,null);
+  const fin=leaves.reduce((m,x)=>(!m||x.fin>m)?x.fin:m,null);
+  const ch=leaves.reduce((s,x)=>s+(x.charge||0),0);
+  const av=ch? Math.round(leaves.reduce((s,x)=>s+(x.charge||0)*(x.avancement||0),0)/ch)
+             : Math.round(leaves.reduce((s,x)=>s+(x.avancement||0),0)/leaves.length);
+  return {debut, fin, avancement:av, charge:ch};
+}
+function dashRow(level, dot, nom, info, color, lignes, isJalon){
+  const plan = info? miniPlan(info.debut, info.fin, color) : '<div class="mplan"></div>';
+  const av = info? info.avancement : 0, ch = info? info.charge : 0;
+  const nameCell = level===0? `<strong>${esc(nom)}</strong>`
+    : `<span style="padding-left:${level*18}px;color:var(--ink-2)">${isJalon?'◆ ':'└ '}${esc(nom)}</span>`;
+  return `<tr class="${level>0?'lvl':''}"><td>${dot}</td><td>${nameCell}</td>
+    <td>${plan}</td><td class="num">${ch?ch+' j':''}</td><td class="num">${lignes!=null?lignes:''}</td>
+    <td><div style="display:flex;align-items:center;gap:8px"><div class="prog" style="flex:1;min-width:60px"><i style="width:${av}%;background:${color}"></i></div><span class="mono" style="font-size:11px">${av}%</span></div></td></tr>`;
+}
+function dashTaskRows(t, level, detail, color){
+  let out = dashRow(level, '', t.nom, noeudInfo(t), color, null, t.type==='jalon');
+  if(level < detail-1){
+    state.taches.filter(x=>x.parentId===t.id).forEach(k=> out += dashTaskRows(k, level+1, detail, color));
+  }
+  return out;
+}
+function phaseRows(detail){
+  let out='';
+  state.phases.slice().sort((a,b)=>a.ordre-b.ordre).forEach(p=>{
+    const s=phaseSpan(p.id), lignes=state.taches.filter(t=>t.phaseId===p.id);
+    const ch=lignes.filter(t=>!estParent(t.id)).reduce((x,t)=>x+(t.charge||0),0);
+    out += dashRow(0, `<span class="dot" style="background:${p.couleur}"></span>`, p.nom,
+      s?{debut:s.debut,fin:s.fin,avancement:s.avancement,charge:ch}:null, p.couleur, lignes.length);
+    if(detail>=2){ state.taches.filter(t=>t.phaseId===p.id && !t.parentId).forEach(t=> out += dashTaskRows(t,1,detail,p.couleur)); }
+  });
+  return out;
+}
 function renderDashboard(){
   const feuilles = state.taches.filter(t=>!estParent(t.id)&&t.type!=='jalon');
   const avg = feuilles.length? Math.round(feuilles.reduce((s,t)=>s+(t.avancement||0),0)/feuilles.length):0;
@@ -1480,9 +1543,16 @@ function renderDashboard(){
   const prochain = jalons.find(j=>j.debut>=today());
   const h = horizon();
   const ecoule = Math.max(0,Math.min(100,Math.round(diffDays(h.debut,today())/Math.max(1,diffDays(h.debut,h.fin))*100)));
+  const dev = state.params.devise;
+  const sig2 = x => { x=Number(x)||0; if(!isFinite(x)||x===0) return 0; return Number(x.toPrecision(2)); };
+  const valAtt = Number((state.charte||{}).valeurAttendue)||0;
+  const valProduite = sig2(valAtt * avg/100);
+  const budgetConso = (state.budget||[]).reduce((s,b)=>s+(Number(b.montantRealise)||0),0);
 
   const kpis = [
     ['Avancement global', avg+' %', `${feuilles.length} tâches élémentaires`],
+    ['Valeur produite', valProduite.toLocaleString('fr-FR')+' '+dev, `non déployée · ${avg} % de la valeur attendue`],
+    ['Budget consommé', budgetConso.toLocaleString('fr-FR')+' '+dev, 'réalisé (gestion budgétaire)'],
     ['Temps écoulé', ecoule+' %', `${workdaysBetween(today()<h.fin?today():h.fin,h.fin)} j ouvrés restants`],
     ['Charge planifiée', charge.toLocaleString('fr-FR')+' j', `${state.acteurs.filter(a=>a.actif).length} acteurs actifs`],
     ['Actions en retard', String(retard), retard? 'À traiter en priorité':'Aucun retard'],
@@ -1491,20 +1561,11 @@ function renderDashboard(){
 
   $('#view-dashboard').innerHTML = `
     <div class="kpis">${kpis.map(k=>`<div class="kpi"><div class="kpi__k">${k[0]}</div><div class="kpi__v">${esc(k[1])}</div><div class="kpi__n">${esc(k[2])}</div></div>`).join('')}</div>
-    <div class="card"><div class="card__head"><h2>Avancement par phase</h2></div>
+    <div class="card"><div class="card__head"><h2>Avancement par phase</h2>
+      <div class="seg" id="dashSeg">${[[1,'Niveau 1'],[2,'Niveau 2'],[3,'Niveau 3']].map(([k,l])=>`<button data-dd="${k}" class="${dashDetail===k?'is-active':''}">${l}</button>`).join('')}</div></div>
       <table class="tbl">
-        <thead><tr><th style="width:34px"></th><th>Phase</th><th>Début</th><th>Fin</th><th class="num">Durée</th><th class="num">Charge</th><th class="num">Lignes</th><th style="width:150px">Avancement</th></tr></thead>
-        <tbody>${state.phases.sort((a,b)=>a.ordre-b.ordre).map(p=>{
-          const s = phaseSpan(p.id);
-          const lignes = state.taches.filter(t=>t.phaseId===p.id);
-          const ch = lignes.filter(t=>!estParent(t.id)).reduce((x,t)=>x+(t.charge||0),0);
-          return `<tr><td><span class="dot" style="background:${p.couleur}"></span></td>
-            <td><strong>${esc(p.nom)}</strong></td>
-            <td class="mono">${s?fmtFR(s.debut):'—'}</td><td class="mono">${s?fmtFR(s.fin):'—'}</td>
-            <td class="num">${s?workdaysBetween(s.debut,s.fin)+' j':'—'}</td>
-            <td class="num">${ch} j</td><td class="num">${lignes.length}</td>
-            <td><div style="display:flex;align-items:center;gap:8px"><div class="prog" style="flex:1"><i style="width:${s?s.avancement:0}%;background:${p.couleur}"></i></div><span class="mono" style="font-size:11px">${s?s.avancement:0}%</span></div></td></tr>`;
-        }).join('')}</tbody></table></div>
+        <thead><tr><th style="width:34px"></th><th>Phase / tâche</th><th style="min-width:170px">Planning</th><th class="num">Charge</th><th class="num">Lignes</th><th style="width:150px">Avancement</th></tr></thead>
+        <tbody>${phaseRows(dashDetail)}</tbody></table></div>
     <div class="card"><div class="card__head"><h2>Jalons</h2></div>
       <table class="tbl"><thead><tr><th>Date</th><th>Jalon</th><th>Phase</th><th>Responsable</th><th>Statut</th></tr></thead>
       <tbody>${jalons.map(j=>{const p=phaseById(j.phaseId);const st=statutDef(j.statut);
@@ -1512,6 +1573,7 @@ function renderDashboard(){
         return `<tr><td class="mono ${late?'overdue':''}">${fmtFR(j.debut)}</td><td>${esc(j.nom)}</td>
         <td><span class="tag" style="color:${p.couleur}">${esc(p.nom)}</span></td><td>${esc(acteurNom(j.responsableId))}</td>
         <td><span class="tag ${late?'tag--late':st.cls}">${late?'En retard':st.nom}</span></td></tr>`;}).join('')||'<tr><td colspan="5" class="muted">Aucun jalon défini.</td></tr>'}</tbody></table></div>`;
+  const ds=$('#dashSeg'); if(ds) ds.onclick=e=>{ const b=e.target.closest('[data-dd]'); if(b){ dashDetail=Number(b.dataset.dd); renderDashboard(); } };
 }
 
 /* ============================================================
@@ -1554,6 +1616,7 @@ function wireGantt(rows,start,z){
     if(tw){ const id=tw.dataset.tw; collapsed.has(id)?collapsed.delete(id):collapsed.add(id); renderGantt(); return; }
     const ed=e.target.closest('[data-edit]'); if(ed){ editTache(ed.dataset.edit); return; }
     const sb=e.target.closest('[data-sub]'); if(sb){ const p=tacheById(sb.dataset.sub); editTache(null,{parentId:p.id,phaseId:p.phaseId,debut:p.debut,fin:p.fin}); return; }
+    const rs=e.target.closest('[data-restore]'); if(rs){ const t=tacheById(rs.dataset.restore); if(t){ t.archive=false; t.maj=nowStamp(); PERSIST.saveItem('taches', t).catch(er=>handleWriteError(er,'taches',t.id,t)); renderGantt(); toast('Tâche restaurée'); } return; }
     const row=e.target.closest('[data-row]');
     if(row){ selTache = selTache===row.dataset.row?null:row.dataset.row; renderGantt(); }
   });
@@ -1757,6 +1820,72 @@ async function importActionsCSV(text){
   }
   return {created, skipped, total:rows.length, error: (errors.length && !created)? "Import en echec (voir la console pour le detail)." : null};
 }
+async function importGanttCSV(text){
+  const {headers, rows}=parseCSV(text);
+  if(!rows.length) return {created:0,skipped:0,error:'Aucune ligne de données trouvée.'};
+  const norm=headers.map(normKey);
+  if(!norm.some(h=>['libelle','tache','titre','nom'].includes(h)))
+    return {created:0,skipped:0,error:"Colonne « Libellé » (ou « Tâche ») introuvable dans l'en-tête."};
+  const phByName={}; state.phases.forEach(x=>phByName[normKey(x.nom)]=x);
+  const ensurePhase=async(name)=>{ const key=normKey(name); if(key&&phByName[key]) return phByName[key].id;
+    const nom=(name||'').trim()||'Import';
+    const ph={id:uid('ph'),nom,ordre:(state.phases.length?Math.max.apply(null,state.phases.map(x=>x.ordre||0))+1:1),couleur:'#6B7785'};
+    await PERSIST.saveItem('phases',ph); phByName[normKey(ph.nom)]=ph; return ph.id; };
+  const codeToId={}; let created=0,skipped=0; const errors=[]; const depPending=[];
+  for(const row of rows){
+    const get=colGetter(row);
+    const type=normKey(get(['type']));
+    if(type==='phase') continue;
+    const titre=(get(['libelle','tache','titre','nom'])||'').trim();
+    if(!titre){ skipped++; continue; }
+    let phaseId; try{ phaseId=await ensurePhase(get(['phase'])); }
+    catch(e){ if(e&&e.code==='forbidden') return {created,skipped,error:'Droits insuffisants (lecture seule).'}; errors.push(e); skipped++; continue; }
+    const code=(get(['codewbs','code'])||'').trim();
+    let parentId=null;
+    if(code && code.lastIndexOf('.')>0){ const pc=code.slice(0,code.lastIndexOf('.')); if(codeToId[pc]) parentId=codeToId[pc]; }
+    const respId=impActeur(get(['responsable','assigne','owner']));
+    const deb=impDate(get(['debut','datedebut','start']))||today();
+    const t={ id:uid('t'), phaseId, parentId, type:(type==='jalon'?'jalon':'tache'), nom:titre,
+      debut:deb, fin:impDate(get(['fin','datefin','end']))||deb,
+      charge:Number(String(get(['chargej','charge'])||'').replace(',','.'))||0,
+      avancement:impAvancement(get(['avancement','pourcentage','progress'])),
+      statut:impStatut(get(['statut','etat','status'])),
+      responsableId:respId, dependances:[], note:get(['notes','note'])||'', creeLe:today(), maj:nowStamp() };
+    if(respId) t.assigneLe=nowStamp();
+    try{ await PERSIST.saveItem('taches', t); created++; if(code) codeToId[code]=t.id;
+      const preds=get(['predecesseurs','dependances','prerequis']);
+      if(preds) depPending.push({id:t.id, names:preds.split('/').map(x=>x.trim()).filter(Boolean)});
+    }catch(e){ if(e&&e.code==='forbidden') return {created,skipped,error:'Droits insuffisants (lecture seule).'}; errors.push(e); skipped++; }
+  }
+  for(const dp of depPending){ const t=tacheById(dp.id); if(!t) continue;
+    const ids=dp.names.map(n=>{ const m=state.taches.find(x=>normKey(x.nom)===normKey(n)); return m?m.id:null; }).filter(Boolean);
+    if(ids.length){ t.dependances=ids; try{ await PERSIST.saveItem('taches', t); }catch(e){} } }
+  return {created, skipped, error:(errors.length&&!created)?"Import en échec (voir la console pour le détail).":null};
+}
+function dialogImportGantt(){
+  modal({titre:'Importer le Gantt (CSV)', ok:'Fermer', noSave:true, onOk(){ return true; },
+    corps:`<p class="hint">Collez un CSV ou choisissez un fichier au format de l'export WBS. Colonnes reconnues : Code WBS, Phase, Libellé, Type, Début, Fin, Charge (j), Avancement, Statut, Responsable, Prédécesseurs, Notes. La hiérarchie est reconstruite via le Code WBS (ex. 1.2 est le parent de 1.2.3) ; les phases inconnues sont créées ; responsables et prédécesseurs sont rapprochés par nom. Les lignes de type « Phase » sont ignorées.</p>
+      <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
+        <input type="file" id="impg_file" accept=".csv,text/csv" style="flex:1">
+        <button class="btn btn--sm" id="impg_tpl">Télécharger un modèle</button>
+      </div>
+      <label class="f"><span>Contenu CSV</span><textarea id="impg_txt" style="min-height:150px" placeholder="Code WBS;Niveau;Phase;Libellé;Type;Début;Fin;…"></textarea></label>
+      <div id="impg_res" class="hint" style="margin:6px 0 0"></div>
+      <div class="cf-actions"><button class="btn btn--primary" id="impg_go">Importer</button></div>`});
+  const fileEl=$('#impg_file'), txtEl=$('#impg_txt'), resEl=$('#impg_res');
+  if(fileEl) fileEl.onchange=()=>{ const f=fileEl.files[0]; if(!f) return; const rd=new FileReader(); rd.onload=()=>{ txtEl.value=rd.result; }; rd.readAsText(f,'UTF-8'); };
+  const tpl=$('#impg_tpl'); if(tpl) tpl.onclick=()=> exportCSV('wbs');
+  const go=$('#impg_go'); if(go) go.onclick=async ()=>{
+    const text=(txtEl.value||'').trim();
+    if(!text){ resEl.textContent='Collez un contenu CSV ou choisissez un fichier.'; return; }
+    go.disabled=true; go.textContent='Import…';
+    let r; try{ r=await importGanttCSV(text); }catch(e){ console.error(e); r={created:0,skipped:0,error:"Erreur d'analyse du CSV."}; }
+    go.disabled=false; go.textContent='Importer';
+    if(r.error && !r.created){ resEl.innerHTML='<span style="color:#C6382F">'+esc(r.error)+'</span>'; return; }
+    resEl.innerHTML='<span style="color:#0F8A5F">'+r.created+' tâche(s) créée(s)'+(r.skipped?', '+r.skipped+' ignorée(s)':'')+'.</span>';
+    render();
+  };
+}
 function dialogImportActions(){
   modal({titre:'Importer des actions (CSV)', ok:'Fermer', noSave:true, onOk(){ return true; },
     corps:`<p class="hint">Collez le contenu d'un fichier CSV ou choisissez un fichier. Colonnes reconnues : Section, Action, Détail, Responsable, Échéance, Statut, Priorité, Avancement, Tâche WBS liée. Seule « Action » est obligatoire ; le séparateur (; ou ,) est détecté automatiquement. Les sections inconnues sont créées ; responsables et tâches sont rapprochés par leur nom.</p>
@@ -1910,11 +2039,64 @@ function editAction(id, defaults={}){
 /* ============================================================
    ACTEURS
    ============================================================ */
+function preserveMatrix(container, focusSel, rerender){
+  const c = typeof container==='string'? $(container): container;
+  const w = c && c.querySelector? c.querySelector('.matrix-wrap'):null;
+  const sl = w?w.scrollLeft:0, st = w?w.scrollTop:0;
+  rerender();
+  const c2 = typeof container==='string'? $(container): container;
+  const w2 = c2 && c2.querySelector? c2.querySelector('.matrix-wrap'):null;
+  if(w2){ w2.scrollLeft=sl; w2.scrollTop=st; }
+  if(focusSel && c2 && c2.querySelector){ const ni=c2.querySelector(focusSel);
+    if(ni){ if(ni.focus) ni.focus(); if(ni.setSelectionRange){ const L=(ni.value||'').length; try{ni.setSelectionRange(L,L);}catch(e){} } } }
+}
+function moisLbl(k){ const M=['janv.','févr.','mars','avr.','mai','juin','juil.','août','sept.','oct.','nov.','déc.']; const [y,m]=k.split('-').map(Number); return M[m-1]+' '+String(y).slice(2); }
+function perGranColumns(keys, gran){
+  if(gran==='trimestre'){ const o={},ord=[]; keys.forEach(k=>{ const [y,m]=k.split('-').map(Number); const q='T'+(Math.floor((m-1)/3)+1)+' '+y; if(!o[q]){o[q]=[];ord.push(q);} o[q].push(k); }); return ord.map(l=>({lbl:l,months:o[l]})); }
+  if(gran==='annee'){ const o={},ord=[]; keys.forEach(k=>{ const y=k.slice(0,4); if(!o[y]){o[y]=[];ord.push(y);} o[y].push(k); }); return ord.map(l=>({lbl:l,months:o[l]})); }
+  return keys.map(k=>({lbl:moisLbl(k),months:[k]}));
+}
+let chargeGran='mois';
+function renderPlanCharge(mount){
+  state.chargePrevue = state.chargePrevue || {};
+  const cp=state.chargePrevue, h=horizon(), keys=monthsRange(h.debut,h.fin);
+  const acteurs=state.acteurs.filter(a=>a.actif);
+  const cols=perGranColumns(keys, chargeGran);
+  const val=(aid,months)=>months.reduce((s,k)=>s+(Number(cp[aid+'|'+k])||0),0);
+  const head=`<tr><th class="stick">Acteur — charge prévue (j)</th>${cols.map(c=>`<th>${esc(c.lbl)}</th>`).join('')}<th>Total</th></tr>`;
+  const rows=acteurs.map(a=>{ let tot=0;
+    const cells=cols.map(c=>{ const v=val(a.id,c.months); tot+=v;
+      if(chargeGran==='mois') return `<td><input class="cell" data-cp="${a.id}" data-k="${c.months[0]}" value="${v||''}" inputmode="decimal" placeholder="0"></td>`;
+      return `<td class="mono">${v?Math.round(v*10)/10:''}</td>`; }).join('');
+    return `<tr><td class="stick"><strong>${esc(a.prenom)} ${esc(a.nom)}</strong><div class="muted" style="font-size:10.5px">${esc(a.role)}</div></td>${cells}<td class="mono">${Math.round(tot*10)/10} j</td></tr>`; }).join('');
+  const sumRow=`<tr class="sum"><td class="stick">Total (j)</td>${cols.map(c=>{ const sm=acteurs.reduce((x,a)=>x+val(a.id,c.months),0); return `<td>${Math.round(sm*10)/10}</td>`;}).join('')}<td>${Math.round(acteurs.reduce((x,a)=>x+val(a.id,keys),0)*10)/10}</td></tr>`;
+  $(mount).innerHTML=`
+    <div class="card"><div class="card__body" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:11px 14px">
+      <span class="mono muted" style="font-size:10.5px;letter-spacing:.08em;text-transform:uppercase">Granularité</span>
+      <div class="seg" id="cgSeg">${[['mois','Mois'],['trimestre','Trimestre'],['annee','Année']].map(([k,l])=>`<button data-cg="${k}" class="${chargeGran===k?'is-active':''}">${l}</button>`).join('')}</div>
+      <span class="hint" style="margin:0">Saisissez la charge prévue en jours, par acteur et par mois. Trimestre et année agrègent (lecture seule). Cette charge alimente le plan de charge et remplace celle du Gantt.</span>
+    </div></div>
+    <div class="matrix-wrap"><table class="matrix"><thead>${head}</thead><tbody>${rows}${sumRow}</tbody></table></div>`;
+  const seg=$('#cgSeg'); if(seg) seg.onclick=e=>{ const b=e.target.closest('[data-cg]'); if(b){ chargeGran=b.dataset.cg; renderPlanCharge(mount); } };
+  $(mount).querySelectorAll('[data-cp]').forEach(inp=>{ inp.onchange=()=>{
+    const key=inp.dataset.cp+'|'+inp.dataset.k; const raw=(inp.value||'').replace(',','.').trim();
+    const v=parseFloat(raw);
+    if(raw==='' || isNaN(v)) delete state.chargePrevue[key]; else state.chargePrevue[key]=Math.max(0,v);
+    persistSingleton('chargePrevue');
+    preserveMatrix(mount, `[data-cp="${inp.dataset.cp}"][data-k="${inp.dataset.k}"]`, ()=>renderPlanCharge(mount));
+  }; });
+}
 function renderActeurs(){
-  const charge = chargeParMois();
+  subtabView('view-acteurs','acteurs',[
+    {id:'liste',nom:'Acteurs',run:m=>renderActeursListe(m)},
+    {id:'charge',nom:'Plan de charge',run:m=>renderPlanCharge(m)}
+  ]);
+}
+function renderActeursListe(mount){
+  const cp = state.chargePrevue||{};
   const totalCharge = {};
-  Object.entries(charge).forEach(([k,v])=>{ const a=k.split('|')[0]; totalCharge[a]=(totalCharge[a]||0)+v; });
-  $('#view-acteurs').innerHTML=`
+  Object.entries(cp).forEach(([k,v])=>{ const a=k.split('|')[0]; totalCharge[a]=(totalCharge[a]||0)+(Number(v)||0); });
+  $(mount).innerHTML=`
     <div class="card">
       <div class="card__head"><h2>Équipe projet — ${state.acteurs.length} acteurs</h2>
         <button class="btn btn--primary" id="btnNewAct2">Ajouter un acteur</button></div>
@@ -1948,7 +2130,7 @@ function renderActeurs(){
     </div>`;
   $('#btnNewAct2').onclick=()=>editActeur(null);
   $('#btnNewAbs').onclick=()=>editAbsence();
-  $('#view-acteurs').onclick=e=>{
+  $(mount).onclick=e=>{
     if(e.target.dataset.eda) editActeur(e.target.dataset.eda);
     if(e.target.dataset.delabs){ deleteEntity('absences', e.target.dataset.delabs); }
   };
@@ -2019,7 +2201,7 @@ function renderDispo(){
   let keys=monthsRange(h.debut,h.fin);
   const annees=[...new Set(keys.map(k=>k.slice(0,4)))];
   if(dispoAn!=='all') keys=keys.filter(k=>k.startsWith(dispoAn));
-  const charge=chargeParMois();
+  const charge=state.chargePrevue||{};
   const acteurs=state.acteurs.filter(a=>a.actif);
 
   const head = `<tr><th class="stick">Acteur — capacité en jours</th>${keys.map(k=>`<th>${monthLabel(k)}</th>`).join('')}<th>Total</th></tr>`;
@@ -2060,7 +2242,8 @@ function renderDispo(){
   $('#btnResetDispo').onclick=()=>{ if(confirm('Effacer toutes les saisies mensuelles ?')){ state.dispos={}; persistSingleton('dispos'); renderDispo(); toast('Disponibilités réinitialisées'); } };
   $('#view-dispo').querySelectorAll('.cell').forEach(inp=>{
     inp.onchange=()=>{ const v=Math.max(0,Math.min(100,Number(inp.value)||0));
-      state.dispos[inp.dataset.a+'|'+inp.dataset.k]=v; persistSingleton('dispos'); renderDispo(); };
+      state.dispos[inp.dataset.a+'|'+inp.dataset.k]=v; persistSingleton('dispos');
+      preserveMatrix('#view-dispo', `[data-a="${inp.dataset.a}"][data-k="${inp.dataset.k}"]`, ()=>renderDispo()); };
   });
 }
 
@@ -2173,9 +2356,9 @@ function renderAdmin(){
   $('#ad_demo').onclick=()=>{ if(confirm('Remplacer le contenu actuel par le projet de démonstration ?')){ state=seed(); normalizeStamps(); collapsed.clear(); if(PERSIST.mode==='cloud'){ resetCloud().then(()=>{render(); toast('Projet de démonstration rechargé');}); } else { save(); render(); toast('Projet de démonstration rechargé'); } } };
   $('#ad_vide').onclick=()=>{ if(confirm('Effacer toutes les données du projet ?')){
     const s=seed();
-    state={...s, taches:[], acteurs:[], dispos:{}, absences:[], actions:[], sections:[{id:uid('sc'),nom:'Suivi général',ordre:1}],
+    state={...s, taches:[], acteurs:[], dispos:{}, chargePrevue:{}, tarifMensuel:{}, absences:[], actions:[], sections:[{id:uid('sc'),nom:'Suivi général',ordre:1}],
       commGroupes:[],evenements:[],regles:[],budget:[],realisation:[],demandes:[],documents:[],attendus:[],
-      roles:[],boutEnBout:[],planBascule:[],bascule:[],repetitions:[],photos:[],donnees:[],campagnes:[],
+      roles:[],boutEnBout:[],planBascule:[],bascule:[],repetitions:[],photos:[],donnees:[],campagnes:[],budgetVersions:[],
       projet:{...s.projet,nom:'Nouveau projet',code:'PRJ-001',description:''}};
     collapsed.clear(); if(PERSIST.mode==='cloud'){ resetCloud().then(()=>{render(); toast('Projet vide créé');}); } else { save(); render(); toast('Projet vide créé'); } } };
 }
@@ -2230,6 +2413,14 @@ function jalonsTransverses(){
   return J.sort((a,b)=>a.date.localeCompare(b.date));
 }
 
+let ganttArchiveView=false;
+function archiverTerminees(){
+  const done = state.taches.filter(t=> t.statut==='fait' && !t.archive);
+  if(!done.length){ toast('Aucune tâche terminée à archiver.'); return; }
+  if(!confirm(`Archiver ${done.length} tâche(s) terminée(s) ? Elles seront masquées de la vue active et conservées dans les archives.`)) return;
+  (async()=>{ try{ for(const t of done){ t.archive=true; t.maj=nowStamp(); await PERSIST.saveItem('taches', t); } renderGantt(); toast(done.length+' tâche(s) archivée(s)'); }
+    catch(e){ handleWriteError(e,'taches',done[0].id,done[0]); } })();
+}
 function ganttRows(win){
   const rows=[];
   let vis=null;
@@ -2251,7 +2442,7 @@ function ganttRows(win){
     rows.push({kind:'phase',phase:ph,span,code:String(ph.ordre),depth:0,id:'PH-'+ph.id});
     if(collapsed.has('PH-'+ph.id)) return;
     const walk=(pid,prefix,depth)=>{
-      const kids = state.taches.filter(t=>t.phaseId===ph.id && t.parentId===pid);
+      const kids = state.taches.filter(t=>t.phaseId===ph.id && t.parentId===pid && (ganttArchiveView || !t.archive));
       kids.sort((a,b)=>(a.debut||'').localeCompare(b.debut||''));
       let n=0;
       kids.forEach(t=>{
@@ -2292,6 +2483,9 @@ function renderGantt(){
     ${dayMode?'':'<button class="btn" id="btnToday">Aujourd\'hui</button>'}
     <div style="margin-left:auto;display:flex;gap:8px">
       <button class="btn" id="btnCsvWbs">Exporter en CSV</button>
+      <button class="btn" id="btnImpWbs">Importer (CSV)</button>
+      <button class="btn ${ganttArchiveView?'is-on':''}" id="btnArchView" title="Afficher aussi les tâches archivées (lecture seule)">Archives</button>
+      <button class="btn" id="btnArchDone">Archiver les terminées</button>
       <button class="btn" id="btnNewJalon">Ajouter un jalon</button>
       <button class="btn btn--primary" id="btnNewTache">Ajouter une tâche</button>
     </div>`;
@@ -2315,6 +2509,9 @@ function renderGantt(){
   $('#btnNewTache').onclick = ()=> editTache(null,{});
   $('#btnNewJalon').onclick = ()=> editTache(null,{type:'jalon'});
   $('#btnCsvWbs').onclick = ()=> exportCSV('wbs');
+  { const bi=$('#btnImpWbs'); if(bi) bi.onclick=()=>dialogImportGantt(); }
+  { const bv=$('#btnArchView'); if(bv) bv.onclick=()=>{ ganttArchiveView=!ganttArchiveView; renderGantt(); if(ganttArchiveView) toast('Vue avec archivées — lecture seule'); }; }
+  { const bd=$('#btnArchDone'); if(bd) bd.onclick=()=>archiverTerminees(); }
   $('#btnJalons').onclick = ()=>{ ganttJalons=!ganttJalons; renderGantt(); };
   if(dayMode){
     $('#gLbl').textContent = `S${isoWeek(s2d(start))} · ${fmtFR(start)} → ${fmtFR(end)}`;
@@ -2396,28 +2593,29 @@ function renderGantt(){
     if(s && s.debut && !(s.fin<start || s.debut>end)){
       const a=x(s.debut);
       if(!isPhase && t.type==='jalon'){
-        barHTML = `<div class="ms" style="left:${a}px;background:${col}" data-id="${t.id}" data-role="bar"></div>
+        barHTML = `<div class="ms" style="left:${a}px;background:${col}" data-id="${ganttArchiveView?'':t.id}" data-role="bar"></div>
                    <div class="ms__lbl" style="left:${a+22}px">${esc(t.nom.length>44?t.nom.slice(0,44)+'…':t.nom)}</div>`;
       } else {
         const w=Math.max(3,x(s.fin)+z.ppd-a);
         const sum = isPhase || hasKids;
         barHTML = `<div class="bar${sum?' bar--sum':''}" style="left:${a}px;width:${w}px;background:${col};border-top-color:${col}"
-            data-id="${isPhase?'':t.id}" data-role="bar" title="${esc(nom)} · ${fmtFR(s.debut)} → ${fmtFR(s.fin)} · ${av}%">
-            ${sum?'':`<div class="bar__fill" style="width:${100-av}%;left:auto;right:0"></div>
+            data-id="${(isPhase||ganttArchiveView)?'':t.id}" data-role="bar" title="${esc(nom)} · ${fmtFR(s.debut)} → ${fmtFR(s.fin)} · ${av}%">
+            ${(sum||ganttArchiveView)?'':`<div class="bar__fill" style="width:${100-av}%;left:auto;right:0"></div>
             <div class="bar__grip bar__grip--l"></div><div class="bar__grip bar__grip--r"></div>`}
           </div>
           <div class="bar__lbl" style="left:${a+w}px">${av}%${!isPhase&&t.responsableId?' · '+esc(acteurNom(t.responsableId).split(' ')[0]):''}</div>`;
       }
     }
     const twist = hasKids ? `<button class="twist" data-tw="${r.id}">${collapsed.has(r.id)?'▶':'▼'}</button>` : '<span class="twist is-leaf"></span>';
+    const arch = !isPhase && t && t.archive;
     const meta = s&&s.debut ? `${fmtFR(s.debut)} → ${fmtFR(s.fin)}` : '';
-    return `<div class="g-row${isPhase?' g-row--l1':''}${selTache===r.id?' is-sel':''}" data-row="${r.id}">
+    return `<div class="g-row${isPhase?' g-row--l1':''}${arch?' is-archived':''}${selTache===r.id?' is-sel':''}" data-row="${r.id}">
       <div class="g-row__left" style="padding-left:${6+r.depth*13}px">
         ${twist}<span class="dot" style="background:${col}"></span>
         <span class="wbs">${r.code}</span>
         <span class="g-name${!isPhase&&t.type==='jalon'?' g-name--milestone':''}">${esc(nom)}</span>
         <span class="g-meta">${meta}</span>
-        ${isPhase?'':`<button class="rowbtn" data-edit="${t.id}" title="Modifier">✎</button><button class="rowbtn" data-sub="${t.id}" title="Ajouter une sous-tâche">＋</button>`}
+        ${isPhase?'':(ganttArchiveView?(arch?`<button class="rowbtn" data-restore="${t.id}" title="Restaurer cette tâche">⟲</button>`:''):`<button class="rowbtn" data-edit="${t.id}" title="Modifier">✎</button><button class="rowbtn" data-sub="${t.id}" title="Ajouter une sous-tâche">＋</button>`)}
       </div>
       <div class="g-row__time" style="width:${W}px">${barHTML}</div>
     </div>`;
@@ -3191,6 +3389,9 @@ Object.assign(REG,{
       {k:'montantRealise',label:'Réalisé',type:'money'},
       {k:'responsableId',label:'Responsable',type:'acteur'},
       {k:'statut',label:'Statut',type:'statut',w:'112px'},
+      {k:'dateApplication',label:"Date d'application",type:'date',w:'120px'},
+      {k:'debut',label:'Début de dépense',type:'date',hideCol:true},
+      {k:'fin',label:'Fin de dépense',type:'date',hideCol:true},
       {k:'commentaire',label:'Commentaire',type:'textarea',hideCol:true}]},
   realisation:{store:'realisation',prefix:'re',single:'objet de réalisation',addLabel:'Ajouter un objet',groupBy:'categorie',groupLabel:'Tous les types',respKey:'responsableId',statutKey:'statut',
     champs:[
@@ -3402,7 +3603,7 @@ function seedExtra(A,domaines){
     {serie:'Répétition 2',action:'Reprise à blanc complète',typeDonnee:'Tous',debut:'2027-11-15',fin:'2027-11-26',responsableId:A(11),resultat:'Non démarré',statut:'na',constats:''},
     {serie:'Répétition 2',action:'Répétition générale avec les key users',typeDonnee:'—',debut:'2027-11-22',fin:'2027-11-26',responsableId:A(1),resultat:'Non démarré',statut:'na',constats:''}]);
   return {commGroupes,evenements,regles,budget,realisation,demandes,documents,attendus,roles,boutEnBout,planBascule,bascule,repetitions,
-    photos:[], charte:{texte:CHARTE_DEFAUT,maj:nowStamp()}, testStrategie:{texte:STRAT_DEFAUT,maj:nowStamp()},
+    photos:[], budgetVersions:[], charte:{texte:CHARTE_DEFAUT,maj:nowStamp()}, testStrategie:{texte:STRAT_DEFAUT,maj:nowStamp()},
     campagnes:seedCampagnes(A,_donnees), donnees:_donnees};
 }
 const CHARTE_DEFAUT = `Le projet de renouvellement de l'ERP engage l'ensemble des directions. Chaque acteur s'engage à :
@@ -3459,7 +3660,69 @@ function editPhoto(id){
       return false; }});
   if(id) $('#ph_del').onclick=()=>deleteEntity('photos', id, 'Photo supprimée');
 }
+function tarifDe(aid, mk){ const t=(state.tarifMensuel||{})[aid+'|'+mk]; if(t!==undefined&&t!==''&&t!==null) return Number(t)||0; const a=acteurById(aid); return a?(Number(a.tjm)||0):0; }
+function coutRessMois(aid, mk){ return (Number((state.chargePrevue||{})[aid+'|'+mk])||0) * tarifDe(aid, mk); }
+function coutRessTotal(){ let s=0; const cp=state.chargePrevue||{}; Object.keys(cp).forEach(key=>{ const i=key.indexOf('|'); if(i<0) return; s+=coutRessMois(key.slice(0,i), key.slice(i+1)); }); return s; }
+let ressGran='mois';
+function ressWeeks(keys){
+  if(!keys.length) return [];
+  let d=s2d(keys[0]+'-01'); const dow=(d.getDay()+6)%7; d=new Date(d.getTime()-dow*DAY);
+  const lastMk=keys[keys.length-1]; const out=[];
+  while(true){ const mk=monthKey(d); if(mk>lastMk) break; if(keys.includes(mk)) out.push({monday:new Date(d), mk}); d=new Date(d.getTime()+7*DAY); if(out.length>600) break; }
+  return out;
+}
+function renderCoutRessources(mount){
+  state.chargePrevue = state.chargePrevue||{}; state.tarifMensuel = state.tarifMensuel||{};
+  const dev=state.params.devise, h=horizon(), keys=monthsRange(h.debut,h.fin);
+  const acteurs=state.acteurs.filter(a=>a.actif);
+  const totalActeur=aid=> keys.reduce((s,k)=>s+coutRessMois(aid,k),0);
+  let head, rows, sumRow;
+  if(ressGran==='mois'){
+    head=`<tr><th class="stick">Acteur — coût mensuel (${dev})</th>${keys.map(k=>`<th>${esc(moisLbl(k))}</th>`).join('')}<th>Coût total</th></tr>`;
+    rows=acteurs.map(a=>{ const cells=keys.map(k=>{ const j=Number((state.chargePrevue||{})[a.id+'|'+k])||0, tj=tarifDe(a.id,k), cout=coutRessMois(a.id,k);
+        const tip = j? `${a.prenom} ${a.nom} — ${moisLbl(k)} : ${Math.round(j*10)/10} j × ${tj.toLocaleString('fr-FR')} ${dev} = ${Math.round(cout).toLocaleString('fr-FR')} ${dev}` : `${a.prenom} ${a.nom} — ${moisLbl(k)} : aucune charge prévue`;
+        return `<td class="mono" title="${esc(tip)}">${cout?Math.round(cout).toLocaleString('fr-FR'):''}</td>`;}).join('');
+      return `<tr><td class="stick"><strong>${esc(a.prenom)} ${esc(a.nom)}</strong><div class="muted" style="font-size:10.5px">${esc(a.role)}</div></td>${cells}<td class="mono">${Math.round(totalActeur(a.id)).toLocaleString('fr-FR')} ${dev}</td></tr>`;
+    }).join('');
+    sumRow=`<tr class="sum"><td class="stick">Coût (${dev})</td>${keys.map(k=>{ const s=acteurs.reduce((x,a)=>x+coutRessMois(a.id,k),0); return `<td>${Math.round(s).toLocaleString('fr-FR')}</td>`;}).join('')}<td>${Math.round(coutRessTotal()).toLocaleString('fr-FR')}</td></tr>`;
+  } else if(ressGran==='trimestre'){
+    const cols=perGranColumns(keys,'trimestre');
+    head=`<tr><th class="stick">Acteur — coût (${dev})</th>${cols.map(c=>`<th>${esc(c.lbl)}</th>`).join('')}<th>Total</th></tr>`;
+    rows=acteurs.map(a=>{ const cells=cols.map(c=>{ const s=c.months.reduce((x,k)=>x+coutRessMois(a.id,k),0); return `<td class="mono">${s?Math.round(s).toLocaleString('fr-FR'):''}</td>`;}).join('');
+      return `<tr><td class="stick"><strong>${esc(a.prenom)} ${esc(a.nom)}</strong></td>${cells}<td class="mono">${Math.round(totalActeur(a.id)).toLocaleString('fr-FR')} ${dev}</td></tr>`;}).join('');
+    sumRow=`<tr class="sum"><td class="stick">Coût (${dev})</td>${cols.map(c=>{ const s=acteurs.reduce((x,a)=>x+c.months.reduce((y,k)=>y+coutRessMois(a.id,k),0),0); return `<td>${Math.round(s).toLocaleString('fr-FR')}</td>`;}).join('')}<td>${Math.round(coutRessTotal()).toLocaleString('fr-FR')}</td></tr>`;
+  } else {
+    const weeks=ressWeeks(keys), weekCount={}; weeks.forEach(w=>{ weekCount[w.mk]=(weekCount[w.mk]||0)+1; });
+    const wcost=(aid,w)=> coutRessMois(aid,w.mk)/(weekCount[w.mk]||1);
+    const wlbl=w=>{ const d=w.monday; return String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0'); };
+    head=`<tr><th class="stick">Acteur — coût hebdomadaire (${dev})</th>${weeks.map(w=>`<th title="Semaine du ${wlbl(w)} · rattachée à ${moisLbl(w.mk)}">${wlbl(w)}</th>`).join('')}<th>Total</th></tr>`;
+    rows=acteurs.map(a=>{ const cells=weeks.map(w=>{ const s=wcost(a.id,w); return `<td class="mono">${s?Math.round(s).toLocaleString('fr-FR'):''}</td>`;}).join('');
+      return `<tr><td class="stick"><strong>${esc(a.prenom)} ${esc(a.nom)}</strong></td>${cells}<td class="mono">${Math.round(totalActeur(a.id)).toLocaleString('fr-FR')} ${dev}</td></tr>`;}).join('');
+    sumRow=`<tr class="sum"><td class="stick">Coût (${dev})</td>${weeks.map(w=>{ const s=acteurs.reduce((x,a)=>x+wcost(a.id,w),0); return `<td>${Math.round(s).toLocaleString('fr-FR')}</td>`;}).join('')}<td>${Math.round(coutRessTotal()).toLocaleString('fr-FR')}</td></tr>`;
+  }
+  const hint = ressGran==='mois'? "Coût mensuel de chaque ressource (charge prévue × TJM). Le détail (jours × tarif) apparaît au survol de la souris."
+    : ressGran==='trimestre'? "Coût agrégé par trimestre (charge prévue × tarif). Le tarif se saisit en vue Mois."
+    : "Coût réparti par semaine : le coût d'un mois est réparti sur les semaines dont le lundi tombe dans ce mois.";
+  $(mount).innerHTML=`
+    <div class="kpis"><div class="kpi"><div class="kpi__k">Coût total des ressources</div><div class="kpi__v">${Math.round(coutRessTotal()).toLocaleString('fr-FR')} ${dev}</div><div class="kpi__n">charge prévue × tarif</div></div></div>
+    <div class="card"><div class="card__body" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:11px 14px">
+      <span class="mono muted" style="font-size:10.5px;letter-spacing:.08em;text-transform:uppercase">Granularité</span>
+      <div class="seg" id="rgSeg">${[['mois','Mois'],['trimestre','Trimestre'],['semaine','Semaine']].map(([k,l])=>`<button data-rg="${k}" class="${ressGran===k?'is-active':''}">${l}</button>`).join('')}</div>
+      <span class="hint" style="margin:0">${hint}</span>
+    </div></div>
+    ${acteurs.length? `<div class="matrix-wrap"><table class="matrix"><thead>${head}</thead><tbody>${rows}${sumRow}</tbody></table></div>` : '<div class="card"><div class="card__body muted">Aucun acteur actif.</div></div>'}
+    <p class="hint">La charge prévue (jours) se saisit dans « Acteurs projet → Plan de charge ».</p>`;
+  const seg=$('#rgSeg'); if(seg) seg.onclick=e=>{ const b=e.target.closest('[data-rg]'); if(b){ ressGran=b.dataset.rg; renderCoutRessources(mount); } };
+}
+let budgetOverlay=null; let budgetSource='deux';
 function renderBudget(){
+  subtabView('view-budget','budget',[
+    {id:'postes',nom:'Dépenses ponctuelles',run:m=>renderBudgetPostes(m)},
+    {id:'ressources',nom:'Coût des ressources',run:m=>renderCoutRessources(m)},
+    {id:'rapport',nom:'Rapport budgétaire',run:m=>renderBudgetReport(m)}
+  ]);
+}
+function renderBudgetPostes(mount){
   const b=state.budget, dev=state.params.devise;
   const sum=k=>b.reduce((s,x)=>s+(Number(x[k])||0),0);
   const prevu=sum('montantPrevu'),eng=sum('montantEngage'),real=sum('montantRealise');
@@ -3468,22 +3731,148 @@ function renderBudget(){
     ['Engagé',eng.toLocaleString('fr-FR')+' '+dev,prevu?Math.round(eng/prevu*100)+' % du budget':''],
     ['Réalisé',real.toLocaleString('fr-FR')+' '+dev,prevu?Math.round(real/prevu*100)+' % du budget':''],
     ['Reste à engager',(prevu-eng).toLocaleString('fr-FR')+' '+dev,''],
-    ['Charge planifiée (RH)',state.acteurs.reduce((s,a)=>{const c=chargeParMois();const t=Object.entries(c).filter(([k])=>k.startsWith(a.id)).reduce((x,[,v])=>x+v,0);return s+t*a.tjm;},0).toLocaleString('fr-FR',{maximumFractionDigits:0})+' '+dev,'d\'après le Gantt']
+    ['Coût des ressources',Math.round(coutRessTotal()).toLocaleString('fr-FR')+' '+dev,'charge prévue × tarif']
   ];
-  $('#view-budget').innerHTML=`<div class="kpis">${kpis.map(k=>`<div class="kpi"><div class="kpi__k">${k[0]}</div><div class="kpi__v">${esc(k[1])}</div><div class="kpi__n">${esc(k[2])}</div></div>`).join('')}</div>
+  $(mount).innerHTML=`<div class="kpis">${kpis.map(k=>`<div class="kpi"><div class="kpi__k">${k[0]}</div><div class="kpi__v">${esc(k[1])}</div><div class="kpi__n">${esc(k[2])}</div></div>`).join('')}</div>
+    <p class="hint" style="margin:0 0 12px">Renseignez « Début de dépense » et « Fin de dépense » sur chaque poste (bouton ✎) pour alimenter le rapport budgétaire.</p>
     <div id="bu_mount"></div>`;
   renderRegister(REG.budget,'#bu_mount');
 }
+function budgetTimeline(mode){
+  mode = mode||'deux';
+  const parMois={}; const add=(k,v)=>{ if(!k||!v) return; parMois[k]=(parMois[k]||0)+v; };
+  let totalP=0, totalR=0, sansDates=0;
+  if(mode==='ponctuel'||mode==='deux'){
+    (state.budget||[]).forEach(b=>{ const m=Number(b.montantPrevu)||0; if(m<=0) return;
+      if(b.dateApplication){ add(b.dateApplication.slice(0,7), m); totalP+=m; }
+      else if(b.debut && b.fin && b.fin>=b.debut){ const ms=monthsRange(b.debut,b.fin); const part=m/ms.length; ms.forEach(k=>add(k,part)); totalP+=m; }
+      else sansDates++;
+    });
+  }
+  if(mode==='ressources'||mode==='deux'){
+    const cp=state.chargePrevue||{}; Object.keys(cp).forEach(key=>{ const i=key.indexOf('|'); if(i<0) return; const c=coutRessMois(key.slice(0,i), key.slice(i+1)); if(c){ add(key.slice(i+1), c); totalR+=c; } });
+  }
+  const keys=Object.keys(parMois).sort();
+  return {keys, parMois, total: totalP+totalR, totalP, totalR, postes:(state.budget||[]).length, sansDates};
+}
+function budgetChartSVG(tl, ov, dev){
+  let keys=tl.keys.slice();
+  if(ov&&ov.points) ov.points.forEach(pt=>{ if(!keys.includes(pt.k)) keys.push(pt.k); });
+  keys.sort();
+  const ovMap={}; if(ov&&ov.points) ov.points.forEach(pt=>ovMap[pt.k]=pt.v);
+  let acc=0; const curCum=keys.map(k=>{ acc+=(tl.parMois[k]||0); return acc; });
+  let acc2=0; const ovCum=(ov?keys.map(k=>{ acc2+=(ovMap[k]||0); return acc2; }):null);
+  const maxY=Math.max(1, Math.max.apply(null, curCum.concat(ovCum||[0])));
+  const W=760,H=300,padL=66,padR=16,padT=16,padB=42, plotW=W-padL-padR, plotH=H-padT-padB;
+  const X=i=> padL + (keys.length<=1?plotW/2: i*plotW/(keys.length-1));
+  const Y=v=> padT + plotH - (v/maxY)*plotH;
+  const cur=today().slice(0,7), curIdx=keys.indexOf(cur);
+  let grid='',ylab='';
+  for(let g=0;g<=4;g++){ const val=maxY*g/4, yy=Y(val);
+    grid+=`<line x1="${padL}" y1="${yy}" x2="${W-padR}" y2="${yy}" stroke="#E7ECF2"/>`;
+    ylab+=`<text x="${padL-8}" y="${yy+3}" text-anchor="end" font-size="9" fill="#6B7785">${Math.round(val).toLocaleString('fr-FR')}</text>`; }
+  const step=Math.max(1,Math.ceil(keys.length/8));
+  const xlab=keys.map((k,i)=> (i%step===0)?`<text x="${X(i)}" y="${H-padB+16}" text-anchor="middle" font-size="8.5" fill="#6B7785">${k.slice(2)}</text>`:'').join('');
+  const pts=keys.map((k,i)=>X(i)+','+Y(curCum[i]));
+  let solid='',dashed='';
+  if(curIdx>=0){ solid='M'+pts.slice(0,curIdx+1).map((pp,i)=>(i?'L':'')+pp).join(' ');
+    dashed='M'+pts.slice(curIdx).map((pp,i)=>(i?'L':'')+pp).join(' '); }
+  else dashed='M'+pts.map((pp,i)=>(i?'L':'')+pp).join(' ');
+  let area='';
+  if(curIdx>=0){ const a=['M'+X(0)+','+Y(0)]; for(let i=0;i<=curIdx;i++) a.push('L'+X(i)+','+Y(curCum[i])); a.push('L'+X(curIdx)+','+Y(0)+' Z'); area=`<path d="${a.join(' ')}" fill="#2547C8" opacity=".08"/>`; }
+  const ovPath = ovCum? 'M'+keys.map((k,i)=>(i?'L':'')+X(i)+','+Y(ovCum[i])).join(' ') : '';
+  const todayLine = curIdx>=0? `<line x1="${X(curIdx)}" y1="${padT}" x2="${X(curIdx)}" y2="${padT+plotH}" stroke="#C6382F" stroke-dasharray="3 3" opacity=".6"/><text x="${X(curIdx)}" y="${padT-4}" text-anchor="middle" font-size="8.5" fill="#C6382F">aujourd'hui</text>` : '';
+  return `<svg viewBox="0 0 ${W} ${H}" class="bu-chart" width="100%" preserveAspectRatio="xMidYMid meet" font-family="ui-monospace,monospace">
+    ${grid}${ylab}${xlab}${area}
+    ${ovPath?`<path d="${ovPath}" fill="none" stroke="#8A5A12" stroke-width="1.6" stroke-dasharray="5 3" opacity=".85"/>`:''}
+    ${todayLine}
+    ${solid?`<path d="${solid}" fill="none" stroke="#2547C8" stroke-width="2.2"/>`:''}
+    ${dashed?`<path d="${dashed}" fill="none" stroke="#2547C8" stroke-width="2" stroke-dasharray="5 4" opacity=".65"/>`:''}
+  </svg>`;
+}
+function renderBudgetReport(mount){
+  const dev=state.params.devise, tl=budgetTimeline(budgetSource);
+  const srcSeg=`<span class="mono muted" style="font-size:10.5px;letter-spacing:.08em;text-transform:uppercase">Contenu</span>
+      <div class="seg" id="bu_src">${[['ponctuel','Dépenses ponctuelles'],['ressources','Coût des ressources'],['deux','Les deux']].map(([k,l])=>`<button data-src="${k}" class="${budgetSource===k?'is-active':''}">${l}</button>`).join('')}</div>`;
+  if(!tl.keys.length){
+    $(mount).innerHTML=`<div class="card"><div class="card__body" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:11px 14px">${srcSeg}</div></div>
+      <div class="card"><div class="card__body muted">Rien à afficher pour ce contenu. Renseignez une « Date d'application » (et un montant prévu) sur des dépenses ponctuelles, et/ou une charge prévue et un tarif pour les ressources.</div></div>`;
+    const s0=$('#bu_src'); if(s0) s0.onclick=e=>{ const b=e.target.closest('[data-src]'); if(b){ budgetSource=b.dataset.src; renderBudgetReport(mount);} };
+    return;
+  }
+  const cur=today().slice(0,7);
+  const realise=tl.keys.reduce((s,k)=> s+(k<=cur?tl.parMois[k]:0),0), avenir=tl.total-realise;
+  const versions=(state.budgetVersions||[]).slice().sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  const ov=budgetOverlay? versions.find(v=>v.id===budgetOverlay):null;
+  const srcLbl = budgetSource==='ponctuel'?'dépenses ponctuelles':budgetSource==='ressources'?'coût des ressources':'ponctuelles + ressources';
+  const kpis=[
+    ['Budget prévu total', Math.round(tl.total).toLocaleString('fr-FR')+' '+dev, budgetSource==='deux'?`${Math.round(tl.totalP).toLocaleString('fr-FR')} ponctuel + ${Math.round(tl.totalR).toLocaleString('fr-FR')} ressources`:srcLbl],
+    ['Réalisé à ce jour', Math.round(realise).toLocaleString('fr-FR')+' '+dev, tl.total?Math.round(realise/tl.total*100)+' %':''],
+    ['Reste à venir', Math.round(avenir).toLocaleString('fr-FR')+' '+dev, tl.sansDates?tl.sansDates+' ponctuelle(s) sans date':''],
+    ['Versions', String(versions.length), ov?('vs '+ov.nom):'']
+  ];
+  $(mount).innerHTML=`<div class="kpis">${kpis.map(k=>`<div class="kpi"><div class="kpi__k">${k[0]}</div><div class="kpi__v">${esc(k[1])}</div><div class="kpi__n">${esc(k[2])}</div></div>`).join('')}</div>
+    <div class="card"><div class="card__body" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:11px 14px">
+      ${srcSeg}
+      <span class="mono muted" style="font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;margin-left:8px">Comparer à une version</span>
+      <select id="bu_ov" style="width:280px"><option value="">— Aucune —</option>${versions.map(v=>`<option value="${v.id}" ${budgetOverlay===v.id?'selected':''}>${esc(v.nom)} · ${fmtFR(v.date)} (${Math.round(v.total).toLocaleString('fr-FR')} ${dev})</option>`).join('')}</select>
+      <div style="margin-left:auto"><button class="btn btn--primary" id="bu_save">Enregistrer une version</button></div>
+    </div></div>
+    <div class="card"><div class="card__head"><h2>Engagement des dépenses dans le temps (cumulé)</h2></div>
+      <div class="card__body">${budgetChartSVG(tl, ov, dev)}
+      <div class="bu-legend">
+        <span><i class="bl bl--real"></i>Réalisé (cumulé, jusqu'à aujourd'hui)</span>
+        <span><i class="bl bl--fut"></i>À venir (cumulé, prévu)</span>
+        ${ov?`<span><i class="bl bl--ov"></i>${esc(ov.nom)} — total</span>`:''}
+      </div></div></div>
+    ${versions.length?`<div class="card"><div class="card__head"><h2>Versions enregistrées</h2></div>
+      <table class="tbl"><thead><tr><th>Version</th><th style="width:120px">Date</th><th class="num" style="width:160px">Total prévu</th><th style="width:100px"></th></tr></thead>
+      <tbody>${versions.map(v=>`<tr><td><strong>${esc(v.nom)}</strong></td><td class="mono">${fmtFR(v.date)}</td>
+        <td class="num mono">${Math.round(v.total).toLocaleString('fr-FR')} ${dev}</td>
+        <td><button class="btn btn--sm btn--ghost btn--danger" data-delver="${v.id}">Supprimer</button></td></tr>`).join('')}</tbody></table></div>`:''}`;
+  const src=$('#bu_src'); if(src) src.onclick=e=>{ const b=e.target.closest('[data-src]'); if(b){ budgetSource=b.dataset.src; renderBudgetReport(mount);} };
+  const sel=$('#bu_ov'); if(sel) sel.onchange=e=>{ budgetOverlay=e.target.value||null; renderBudgetReport(mount); };
+  const sv=$('#bu_save'); if(sv) sv.onclick=()=>saveBudgetVersion();
+  $(mount).querySelectorAll('[data-delver]').forEach(btn=>btn.onclick=()=>{ if(confirm('Supprimer cette version ?')) deleteEntity('budgetVersions', btn.dataset.delver, 'Version supprimée'); });
+}
+function saveBudgetVersion(){
+  const tl=budgetTimeline();
+  if(!tl.keys.length){ toast("Renseignez des dates de dépense avant d'enregistrer une version."); return; }
+  const n=(state.budgetVersions||[]).length+1;
+  modal({titre:'Enregistrer une version du budget',
+    corps:`<div class="grid2">
+      <label class="f"><span>Nom</span><input type="text" id="bv_nom" value="Version ${n}"></label>
+      <label class="f"><span>Date</span><input type="date" id="bv_date" value="${today()}"></label></div>
+      <p class="hint">Seul le total (courbe mensuelle agrégée) est mémorisé pour comparaison — pas le détail par poste. Total actuel : ${Math.round(tl.total).toLocaleString('fr-FR')} ${state.params.devise}.</p>`,
+    onOk(r){ const nom=$('#bv_nom',r).value.trim()||('Version '+n);
+      const o={ id:uid('bv'), nom, date:$('#bv_date',r).value||today(), total:Math.round(tl.total),
+        points: tl.keys.map(k=>({k, v:Math.round(tl.parMois[k])})), creeLe:today(), maj:nowStamp() };
+      commitEntity('budgetVersions', o, true, 'Version enregistrée');
+      return false; }});
+}
 function renderContrat(){
+  const c = state.charte || {}, dev = state.params.devise;
   $('#view-contrat').innerHTML=`
+    <div class="card"><div class="card__head"><h2>Valeur et enjeux du projet</h2><button class="btn" id="ct_val">Modifier</button></div>
+      <div class="card__body">
+        <div class="kpi" style="max-width:280px;margin-bottom:14px"><div class="kpi__k">Valeur attendue</div>
+          <div class="kpi__v">${(Number(c.valeurAttendue)||0).toLocaleString('fr-FR')} ${dev}</div>
+          <div class="kpi__n">bénéfice cible du projet</div></div>
+        <div class="cf-h" style="margin-bottom:5px">Pourquoi réaliser ce projet ?</div>
+        <div class="charte">${c.pourquoi?esc(c.pourquoi).replace(/\n/g,'<br>'):'<span class="muted">À renseigner : gains et raisons d\'être du projet.</span>'}</div>
+      </div></div>
     <div class="card"><div class="card__head"><h2>Charte d'engagement</h2><button class="btn" id="ct_edit">Modifier la charte</button></div>
-      <div class="card__body"><div class="charte">${esc(state.charte.texte).replace(/\n/g,'<br>')}</div>
-      <p class="hint" style="margin:12px 0 0">Modifiée le ${fmtDT(state.charte.maj)}</p></div></div>
+      <div class="card__body"><div class="charte">${esc(c.texte||'').replace(/\n/g,'<br>')}</div>
+      <p class="hint" style="margin:12px 0 0">Modifiée le ${fmtDT(c.maj)}</p></div></div>
     <h2 class="subhead">Règles de fonctionnement et engagements de réactivité</h2>
     <div id="rg_mount"></div>`;
   renderRegister(REG.regles,'#rg_mount');
+  $('#ct_val').onclick=()=>modal({titre:'Valeur et enjeux du projet',
+    corps:`<label class="f"><span>Valeur attendue (${dev})</span><input type="number" id="cv_v" value="${Number(c.valeurAttendue)||0}" min="0" step="1000"></label>
+      <label class="f"><span>Pourquoi réaliser ce projet ? (gains attendus)</span><textarea id="cv_p" style="min-height:150px" placeholder="Ex. Réduire le délai de clôture, fiabiliser les stocks, unifier les référentiels…">${esc(c.pourquoi||'')}</textarea></label>`,
+    onOk(r){ state.charte=Object.assign({}, state.charte, {valeurAttendue:Number($('#cv_v',r).value)||0, pourquoi:$('#cv_p',r).value, maj:nowStamp()}); persistSingleton('charte'); toast('Valeur et enjeux mis à jour'); }});
   $('#ct_edit').onclick=()=>modal({titre:'Charte d\'engagement',
-    corps:`<label class="f"><span>Texte de la charte</span><textarea id="ct_t" style="min-height:220px">${esc(state.charte.texte)}</textarea></label>`,
+    corps:`<label class="f"><span>Texte de la charte</span><textarea id="ct_t" style="min-height:220px">${esc(c.texte||'')}</textarea></label>`,
     onOk(r){ state.charte=Object.assign({}, state.charte, {texte:$('#ct_t',r).value,maj:nowStamp()}); persistSingleton('charte'); toast('Charte mise à jour'); }});
 }
 
@@ -3941,6 +4330,48 @@ async function renderUsersCard(){
       catch(e){ toast('Échec de la mise à jour du rôle.'); renderUsersCard(); }
     };
   });
+}
+async function submitFeedback(obj){
+  if(PERSIST.mode==='cloud'){
+    const saved = await DB.saveItem('feedback', obj);   // le RLS autorise l'insert feedback pour tout compte connecté
+    (state.feedback = state.feedback||[]).push(saved||obj);
+    return saved;
+  }
+  (state.feedback = state.feedback||[]).push(obj); save(); return obj;
+}
+function renderFeedback(){
+  const list=(state.feedback||[]).slice().sort((a,b)=>(b.creeLe||'').localeCompare(a.creeLe||''));
+  const peutVoir = PERSIST.mode!=='cloud' || (DB.canEdit && DB.canEdit());
+  $('#view-feedback').innerHTML=`
+    <div class="card"><div class="card__head"><h2>Proposer une amélioration ou signaler un bug</h2></div>
+      <div class="card__body">
+        <p class="hint" style="margin-top:0">Décrivez ce que vous cherchez à faire. Tous les comptes, y compris en lecture seule, peuvent contribuer.</p>
+        <div class="grid2">
+          <label class="f"><span>Nature</span><select id="fb_nat"><option value="amelioration">Proposition d'amélioration</option><option value="bug">Bug / anomalie</option></select></label>
+          <label class="f"><span>Type de besoin</span><select id="fb_cat"><option value="mieux">Le faire mieux (améliorer l'existant)</option><option value="nouveau">Pouvoir le faire (nouvelle possibilité)</option></select></label>
+        </div>
+        <label class="f"><span>Ce que vous souhaitez faire</span><textarea id="fb_txt" style="min-height:130px" placeholder="Dans quel écran, ce que vous voulez faire, et le résultat attendu."></textarea></label>
+        <div style="display:flex;justify-content:flex-end;margin-top:6px"><button class="btn" id="fb_go" style="background:var(--accent);color:#fff;border-color:var(--accent)">Envoyer</button></div>
+        <div id="fb_res" class="hint" style="margin-top:6px"></div>
+      </div></div>
+    ${peutVoir? `<div class="card"><div class="card__head"><h2>Demandes reçues</h2><span class="section__count">${list.length}</span></div>
+      ${list.length? `<table class="tbl"><thead><tr><th style="width:96px">Date</th><th style="width:120px">Nature</th><th style="width:150px">Besoin</th><th>Description</th><th style="width:170px">Auteur</th></tr></thead>
+      <tbody>${list.map(f=>`<tr>
+        <td class="mono">${fmtFR(f.creeLe)}</td>
+        <td><span class="tag ${f.nature==='bug'?'tag--late':''}">${f.nature==='bug'?'Bug':'Amélioration'}</span></td>
+        <td>${f.categorie==='nouveau'?'Pouvoir le faire':'Faire mieux'}</td>
+        <td>${esc(f.objectif||'')}</td>
+        <td class="muted mono" style="font-size:11px">${esc(f.auteur||'—')}</td></tr>`).join('')}</tbody></table>`
+      : '<div class="card__body muted">Aucune demande pour le moment.</div>'}</div>`:''}`;
+  const go=$('#fb_go'); if(go) go.onclick=async ()=>{
+    const txt=($('#fb_txt').value||'').trim();
+    if(!txt){ $('#fb_res').innerHTML='<span style="color:#C6382F">Décrivez votre demande avant d\'envoyer.</span>'; return; }
+    go.disabled=true; go.textContent='Envoi…';
+    const u = (PERSIST.mode==='cloud' && DB.currentUser && DB.currentUser())? DB.currentUser().email : '';
+    const obj={ id:uid('fb'), nature:$('#fb_nat').value, categorie:$('#fb_cat').value, objectif:txt, auteur:u, creeLe:today(), maj:nowStamp() };
+    try{ await submitFeedback(obj); $('#fb_res').innerHTML='<span style="color:#0F8A5F">Merci, votre demande a bien été enregistrée.</span>'; renderFeedback(); }
+    catch(e){ console.error(e); go.disabled=false; go.textContent='Envoyer'; $('#fb_res').innerHTML='<span style="color:#C6382F">Envoi impossible ('+esc((e&&e.code)||'erreur')+'). Réessayez.</span>'; }
+  };
 }
 function showFatal(e){
   const msg = e && (e.message||e.code) ? (e.message||e.code) : String(e);
