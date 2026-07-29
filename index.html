@@ -548,6 +548,7 @@ tr.lvl td{background:rgba(20,30,60,.02)}
   let sb = null;             // client Supabase
   let session = null;        // session courante
   let profileRole = null;    // rôle applicatif de l'utilisateur
+  let profileActeurId = null; // acteur projet rattaché au compte courant (lot 1a — socle accès)
   const authListeners = [];
 
   /* ---- utilitaires ------------------------------------------------------ */
@@ -598,7 +599,7 @@ tr.lvl td{background:rgba(20,30,60,.02)}
     // Propage les changements de session (connexion, déconnexion, refresh).
     sb.auth.onAuthStateChange(async (_evt, s) => {
       session = s || null;
-      profileRole = null;
+      profileRole = null; profileActeurId = null;
       if (session) await loadRole();
       authListeners.forEach(cb => { try { cb(currentUser()); } catch (_) {} });
     });
@@ -606,11 +607,12 @@ tr.lvl td{background:rgba(20,30,60,.02)}
   }
 
   async function loadRole() {
-    if (!session) { profileRole = null; return null; }
+    if (!session) { profileRole = null; profileActeurId = null; return null; }
     const { data, error } = await sb
-      .from('profiles').select('role').eq('user_id', session.user.id).maybeSingle();
-    if (error) { profileRole = null; return null; }
+      .from('profiles').select('role,acteur_id').eq('user_id', session.user.id).maybeSingle();
+    if (error) { profileRole = null; profileActeurId = null; return null; }
     profileRole = data ? data.role : 'lecteur';
+    profileActeurId = data ? (data.acteur_id || null) : null;
     return profileRole;
   }
 
@@ -626,7 +628,7 @@ tr.lvl td{background:rgba(20,30,60,.02)}
   async function signOut() {
     if (!sb) return;
     await sb.auth.signOut();
-    session = null; profileRole = null;
+    session = null; profileRole = null; profileActeurId = null;
   }
 
   function currentUser() {
@@ -635,6 +637,10 @@ tr.lvl td{background:rgba(20,30,60,.02)}
   }
   function role() { return profileRole; }
   function canEdit() { return profileRole === 'editeur' || profileRole === 'admin'; }
+  // Acteur projet rattaché au compte courant (fait autorité — remplace l'ancienne
+  // inférence par e-mail). Renvoie null tant que l'administrateur n'a pas fait
+  // le rattachement dans Utilisateurs et rôles.
+  function myActeurId() { return profileActeurId; }
   function onAuthChange(cb) { authListeners.push(cb); }
 
   /* ---- lecture ---------------------------------------------------------- */
@@ -749,7 +755,7 @@ tr.lvl td{background:rgba(20,30,60,.02)}
   /* ---- exposition ------------------------------------------------------- */
   async function listProfiles(){
     if (!sb) await init();
-    const { data, error } = await sb.from('profiles').select('user_id,email,role').order('email');
+    const { data, error } = await sb.from('profiles').select('user_id,email,role,acteur_id').order('email');
     if (error) throw mapError(error);
     return data;
   }
@@ -760,9 +766,40 @@ tr.lvl td{background:rgba(20,30,60,.02)}
     if (!data || !data.length) throw err('forbidden', "Modification refusée (droits insuffisants).");
     return data[0];
   }
+  // Rattache (ou détache si acteurId est vide) un compte à une fiche acteur.
+  // Réservé aux admins côté RLS — même politique que setRole.
+  async function setActeur(userId, acteurId){
+    if (!sb) await init();
+    const { data, error } = await sb.from('profiles').update({ acteur_id: acteurId || null }).eq('user_id', userId).select();
+    if (error) throw mapError(error);
+    if (!data || !data.length) throw err('forbidden', "Modification refusée (droits insuffisants).");
+    return data[0];
+  }
+  // Crée un compte via un client Supabase isolé (aucune persistance de session,
+  // n'affecte donc jamais la session de l'admin en cours). N'utilise que la
+  // clé publishable — aucune clé secrète requise. Selon le réglage du projet
+  // (confirmation d'e-mail), le nouveau compte devra peut-être confirmer son
+  // adresse avant de pouvoir se connecter.
+  async function createUserAsAdmin(email, password){
+    const mod = await import(LIB);
+    const tmp = mod.createClient(CFG.url, CFG.key, { auth: { persistSession:false, autoRefreshToken:false } });
+    const { data, error } = await tmp.auth.signUp({ email, password });
+    if (error) throw mapError(error);
+    return data && data.user ? { id:data.user.id, email:data.user.email, needsConfirm: !data.session } : null;
+  }
+  // Révoque l'accès applicatif d'un compte (supprime son profil de rôle).
+  // Le compte d'authentification lui-même n'est pas supprimé : une suppression
+  // complète se fait dans la console Supabase (Authentication → Users) ou via
+  // une Edge Function dédiée, car cela requiert la clé secrète.
+  async function revokeAccess(userId){
+    if (!sb) await init();
+    const { error } = await sb.from('profiles').delete().eq('user_id', userId);
+    if (error) throw mapError(error);
+    return true;
+  }
   window.DB = {
-    listProfiles, setRole,
-    init, signIn, signOut, currentUser, role, canEdit, onAuthChange,
+    listProfiles, setRole, setActeur, createUserAsAdmin, revokeAccess,
+    init, signIn, signOut, currentUser, role, canEdit, myActeurId, onAuthChange,
     loadAll, getItem, saveItem, deleteItem, saveSingleton, bulkUpsert,
     subscribe, unsubscribe,
     hydrateItem, hydrateSingleton   // exposés pour l'étape 5 (temps réel)
@@ -822,6 +859,15 @@ const STATUTS = [
 ];
 const PRIORITES = [{id:'h',nom:'Haute'},{id:'m',nom:'Moyenne'},{id:'b',nom:'Basse'}];
 const ORGAS = ['Interne','Intégrateur','Éditeur','AMOA','Métier'];
+// Population = rôle fonctionnel (lot 1a), orthogonal au rôle technique (lecteur/editeur/admin).
+const POPULATIONS = [
+  {v:'direction',    l:'Direction de projet'},
+  {v:'sponsor',       l:'Sponsor'},
+  {v:'contributeur',  l:'Contributeur (chef de domaine)'},
+  {v:'externe',        l:'Externe (hors équipe)'}
+];
+function populationLabel(v){ const p=POPULATIONS.find(x=>x.v===v); return p? p.l : '—'; }
+function populationTag(v){ const p=POPULATIONS.find(x=>x.v===v); return p? `<span class="tag">${esc(p.l)}</span>` : '<span class="muted">—</span>'; }
 
 /* ============================================================
    ÉTAT
@@ -860,79 +906,41 @@ function seed(){
   const T = [];
   const add = (o) => { T.push({id:uid('t'),parentId:null,type:'tache',avancement:0,charge:0,statut:'na',responsableId:null,dependances:[],note:'',...o}); return T[T.length-1].id; };
 
-  // ---- Phase 1 : Cadrage
+  // ---- Phase 1 : Cadrage (squelette de démo — allégé, cf. Lot 0)
   let l = add({phaseId:'ph1',parentId:null,nom:'Gouvernance & lancement',debut:'2026-01-05',fin:'2026-02-27'});
-  add({phaseId:'ph1',parentId:l,nom:'Constitution de l\'équipe projet',debut:'2026-01-05',fin:'2026-01-23',charge:15,responsableId:A(0),avancement:100,statut:'fait'});
   add({phaseId:'ph1',parentId:l,nom:'Charte projet & instances de pilotage',debut:'2026-01-19',fin:'2026-02-06',charge:12,responsableId:A(0),avancement:100,statut:'fait'});
-  add({phaseId:'ph1',parentId:l,nom:'Plan de communication interne',debut:'2026-02-02',fin:'2026-02-27',charge:10,responsableId:A(10),avancement:100,statut:'fait'});
-  l = add({phaseId:'ph1',parentId:null,nom:'Analyse de l\'existant',debut:'2026-01-12',fin:'2026-03-27'});
   add({phaseId:'ph1',parentId:l,nom:'Cartographie des processus actuels',debut:'2026-01-12',fin:'2026-02-20',charge:35,responsableId:A(1),avancement:100,statut:'fait'});
-  add({phaseId:'ph1',parentId:l,nom:'Inventaire des interfaces et flux',debut:'2026-02-02',fin:'2026-03-06',charge:25,responsableId:A(9),avancement:100,statut:'fait'});
-  add({phaseId:'ph1',parentId:l,nom:'Audit qualité des données',debut:'2026-02-16',fin:'2026-03-27',charge:30,responsableId:A(11),avancement:90,statut:'risq'});
-  l = add({phaseId:'ph1',parentId:null,nom:'Trajectoire & budget',debut:'2026-03-02',fin:'2026-04-30'});
-  add({phaseId:'ph1',parentId:l,nom:'Scénarios de trajectoire',debut:'2026-03-02',fin:'2026-03-27',charge:20,responsableId:A(3),avancement:100,statut:'fait'});
-  add({phaseId:'ph1',parentId:l,nom:'Business case & budget pluriannuel',debut:'2026-03-23',fin:'2026-04-24',charge:18,responsableId:A(0),avancement:100,statut:'fait'});
-  add({phaseId:'ph1',parentId:l,nom:'Validation du cadrage en COPIL',debut:'2026-04-30',fin:'2026-04-30',type:'jalon',statut:'fait',avancement:100,responsableId:A(0)});
+  add({phaseId:'ph1',parentId:null,nom:'Validation du cadrage en COPIL',debut:'2026-04-30',fin:'2026-04-30',type:'jalon',statut:'fait',avancement:100,responsableId:A(0)});
 
   // ---- Phase 2 : Définition de la solution cible
   l = add({phaseId:'ph2',parentId:null,nom:'Processus cibles',debut:'2026-04-01',fin:'2026-07-31'});
-  const l21 = add({phaseId:'ph2',parentId:l,nom:'Domaine Finance',debut:'2026-04-01',fin:'2026-06-30'});
-  add({phaseId:'ph2',parentId:l21,nom:'Ateliers comptabilité générale & auxiliaire',debut:'2026-04-01',fin:'2026-05-15',charge:28,responsableId:A(7),avancement:100,statut:'fait'});
-  add({phaseId:'ph2',parentId:l21,nom:'Ateliers contrôle de gestion',debut:'2026-05-11',fin:'2026-06-30',charge:22,responsableId:A(7),avancement:100,statut:'fait'});
-  const l22 = add({phaseId:'ph2',parentId:l,nom:'Domaine Achats & Supply Chain',debut:'2026-04-13',fin:'2026-07-31'});
-  add({phaseId:'ph2',parentId:l22,nom:'Ateliers achats & approvisionnements',debut:'2026-04-13',fin:'2026-06-05',charge:26,responsableId:A(8),avancement:100,statut:'fait'});
-  add({phaseId:'ph2',parentId:l22,nom:'Ateliers stocks & logistique',debut:'2026-06-01',fin:'2026-07-31',charge:30,responsableId:A(8),avancement:75,statut:'cours'});
-  l = add({phaseId:'ph2',parentId:null,nom:'Architecture & interfaces',debut:'2026-05-04',fin:'2026-09-30'});
-  add({phaseId:'ph2',parentId:l,nom:'Dossier d\'architecture technique',debut:'2026-05-04',fin:'2026-06-26',charge:24,responsableId:A(3),avancement:100,statut:'fait'});
+  add({phaseId:'ph2',parentId:l,nom:'Ateliers comptabilité générale & auxiliaire',debut:'2026-04-01',fin:'2026-05-15',charge:28,responsableId:A(7),avancement:100,statut:'fait'});
   add({phaseId:'ph2',parentId:l,nom:'Spécifications des interfaces',debut:'2026-06-22',fin:'2026-09-30',charge:45,responsableId:A(9),avancement:30,statut:'cours'});
-  l = add({phaseId:'ph2',parentId:null,nom:'Stratégie de reprise des données',debut:'2026-06-01',fin:'2026-10-30'});
-  add({phaseId:'ph2',parentId:l,nom:'Règles de mapping et de nettoyage',debut:'2026-06-01',fin:'2026-08-28',charge:35,responsableId:A(11),avancement:40,statut:'risq'});
-  add({phaseId:'ph2',parentId:l,nom:'Plan de reprise et jeux d\'essai',debut:'2026-08-24',fin:'2026-10-30',charge:28,responsableId:A(11)});
   add({phaseId:'ph2',parentId:null,nom:'Gel du périmètre fonctionnel',debut:'2026-10-30',fin:'2026-10-30',type:'jalon',responsableId:A(1)});
 
   // ---- Phase 3 : Réalisation
   l = add({phaseId:'ph3',parentId:null,nom:'Paramétrage du cœur ERP',debut:'2026-09-01',fin:'2027-04-30'});
   add({phaseId:'ph3',parentId:l,nom:'Paramétrage Finance',debut:'2026-09-01',fin:'2027-01-29',charge:110,responsableId:A(7)});
-  add({phaseId:'ph3',parentId:l,nom:'Paramétrage Achats',debut:'2026-10-01',fin:'2027-02-26',charge:95,responsableId:A(8)});
-  add({phaseId:'ph3',parentId:l,nom:'Paramétrage Supply Chain',debut:'2026-11-02',fin:'2027-04-30',charge:120,responsableId:A(8)});
-  l = add({phaseId:'ph3',parentId:null,nom:'Développements spécifiques',debut:'2026-11-02',fin:'2027-05-28'});
   add({phaseId:'ph3',parentId:l,nom:'Interfaces bancaires et EDI',debut:'2026-11-02',fin:'2027-03-31',charge:80,responsableId:A(9)});
-  add({phaseId:'ph3',parentId:l,nom:'Éditions et états réglementaires',debut:'2027-01-04',fin:'2027-05-28',charge:60,responsableId:A(9)});
-  l = add({phaseId:'ph3',parentId:null,nom:'Reprise des données — itérations',debut:'2027-01-04',fin:'2027-06-30'});
-  add({phaseId:'ph3',parentId:l,nom:'Reprise à blanc n°1',debut:'2027-01-04',fin:'2027-02-26',charge:40,responsableId:A(11)});
-  add({phaseId:'ph3',parentId:l,nom:'Reprise à blanc n°2',debut:'2027-03-15',fin:'2027-05-14',charge:40,responsableId:A(11)});
-  add({phaseId:'ph3',parentId:l,nom:'Reprise à blanc n°3',debut:'2027-05-17',fin:'2027-06-30',charge:35,responsableId:A(11)});
   add({phaseId:'ph3',parentId:null,nom:'Livraison de la solution pour recette',debut:'2027-06-30',fin:'2027-06-30',type:'jalon',responsableId:A(2)});
 
   // ---- Phase 4 : Recette
   l = add({phaseId:'ph4',parentId:null,nom:'Recette fonctionnelle',debut:'2027-04-01',fin:'2027-09-30'});
-  add({phaseId:'ph4',parentId:l,nom:'Préparation des cas de test',debut:'2027-04-01',fin:'2027-05-28',charge:45,responsableId:A(1)});
   add({phaseId:'ph4',parentId:l,nom:'Recette par domaine',debut:'2027-06-01',fin:'2027-08-31',charge:120,responsableId:A(4)});
   add({phaseId:'ph4',parentId:l,nom:'Correction des anomalies',debut:'2027-06-15',fin:'2027-09-30',charge:90,responsableId:A(2)});
-  l = add({phaseId:'ph4',parentId:null,nom:'Recette technique',debut:'2027-06-01',fin:'2027-10-29'});
-  add({phaseId:'ph4',parentId:l,nom:'Tests de performance et de charge',debut:'2027-06-01',fin:'2027-07-30',charge:30,responsableId:A(3)});
-  add({phaseId:'ph4',parentId:l,nom:'Tests de bout en bout et interfaces',debut:'2027-08-02',fin:'2027-09-30',charge:40,responsableId:A(9)});
-  add({phaseId:'ph4',parentId:l,nom:'Répétition générale de bascule',debut:'2027-10-04',fin:'2027-10-29',charge:35,responsableId:A(2)});
   add({phaseId:'ph4',parentId:null,nom:'Prononcé de la VABF',debut:'2027-10-29',fin:'2027-10-29',type:'jalon',responsableId:A(0)});
 
   // ---- Phase 5 : Transition
-  l = add({phaseId:'ph5',parentId:null,nom:'Conduite du changement',debut:'2027-09-01',fin:'2027-12-17'});
-  add({phaseId:'ph5',parentId:l,nom:'Supports et parcours de formation',debut:'2027-09-01',fin:'2027-10-29',charge:35,responsableId:A(10)});
-  add({phaseId:'ph5',parentId:l,nom:'Formation des utilisateurs finaux',debut:'2027-11-01',fin:'2027-12-17',charge:60,responsableId:A(10)});
   l = add({phaseId:'ph5',parentId:null,nom:'Bascule en production',debut:'2027-11-01',fin:'2027-12-31'});
-  add({phaseId:'ph5',parentId:l,nom:'Plan de bascule détaillé',debut:'2027-11-01',fin:'2027-11-30',charge:25,responsableId:A(2)});
+  add({phaseId:'ph5',parentId:l,nom:'Formation des utilisateurs finaux',debut:'2027-11-01',fin:'2027-12-17',charge:60,responsableId:A(10)});
   add({phaseId:'ph5',parentId:l,nom:'Reprise finale des données',debut:'2027-12-13',fin:'2027-12-24',charge:30,responsableId:A(11)});
-  add({phaseId:'ph5',parentId:l,nom:'Go / No-Go de bascule',debut:'2027-12-20',fin:'2027-12-20',type:'jalon',responsableId:A(0)});
-  add({phaseId:'ph5',parentId:l,nom:'Démarrage en production',debut:'2028-01-03',fin:'2028-01-03',type:'jalon',responsableId:A(0)});
+  add({phaseId:'ph5',parentId:null,nom:'Démarrage en production',debut:'2028-01-03',fin:'2028-01-03',type:'jalon',responsableId:A(0)});
 
   // ---- Phase 6 : Stabilisation
   l = add({phaseId:'ph6',parentId:null,nom:'Support renforcé',debut:'2028-01-03',fin:'2028-03-31'});
-  add({phaseId:'ph6',parentId:l,nom:'Cellule d\'assistance de proximité',debut:'2028-01-03',fin:'2028-02-29',charge:70,responsableId:A(1)});
   add({phaseId:'ph6',parentId:l,nom:'Traitement des anomalies de production',debut:'2028-01-03',fin:'2028-03-31',charge:80,responsableId:A(2)});
-  l = add({phaseId:'ph6',parentId:null,nom:'Clôture du projet',debut:'2028-03-01',fin:'2028-04-28'});
-  add({phaseId:'ph6',parentId:l,nom:'Transfert vers la TMA',debut:'2028-03-01',fin:'2028-04-14',charge:30,responsableId:A(3)});
   add({phaseId:'ph6',parentId:l,nom:'Bilan projet et retour d\'expérience',debut:'2028-03-27',fin:'2028-04-28',charge:15,responsableId:A(0)});
-  add({phaseId:'ph6',parentId:l,nom:'Clôture administrative',debut:'2028-04-28',fin:'2028-04-28',type:'jalon',responsableId:A(0)});
+  add({phaseId:'ph6',parentId:null,nom:'Clôture administrative',debut:'2028-04-28',fin:'2028-04-28',type:'jalon',responsableId:A(0)});
 
   const sections = [
     {id:'sc1',nom:'Points bloquants',ordre:1},
@@ -952,19 +960,10 @@ function seed(){
 
   const systemes = [
     ['ERP historique','Éditeur historique','Finance, achats, ventes','ERP_PROD','Oracle 19c','Production','Critique','1,8 To',true,'Remplacé par l\'ERP',0,'Source principale de la reprise'],
-    ['ERP historique','Éditeur historique','Finance, achats, ventes','ERP_ARCH','Oracle 19c','Archive','Majeur','4,2 To',false,'Décommissionné',11,'Conservation légale 10 ans à organiser'],
-    ['ERP historique','Éditeur historique','Finance, achats, ventes','ERP_RECETTE','Oracle 19c','Recette','Mineur','1,1 To',false,'Décommissionné',9,''],
     ['WMS entrepôt','Solution logistique','Logistique entrepôt','WMS_PROD','SQL Server 2019','Production','Critique','620 Go',true,'Conservé et interfacé',6,'Interface temps réel à recréer'],
-    ['WMS entrepôt','Solution logistique','Logistique entrepôt','WMS_REF','SQL Server 2019','Production','Majeur','40 Go',true,'Conservé et interfacé',6,'Référentiel emplacements'],
     ['CRM commercial','Éditeur CRM','Relation client','CRM_PROD','PostgreSQL 14','Production','Majeur','310 Go',true,'Conservé et interfacé',1,'Synchronisation clients et devis'],
-    ['Paie et SIRH','Éditeur SIRH','Ressources humaines','RH_PROD','SQL Server 2019','Production','Critique','180 Go',true,'Conservé et interfacé',0,'Écritures de paie à intégrer'],
-    ['GED documentaire','Éditeur GED','Documents et archivage','GED_PROD','PostgreSQL 14','Production','Mineur','2,4 To',true,'Conservé et interfacé',9,'Rattachement des pièces comptables'],
     ['Décisionnel groupe','Plateforme BI','Pilotage et reporting','DWH','Snowflake','Production','Majeur','5,6 To',true,'Refonte',3,'Modèle à reconstruire sur le nouvel ERP'],
-    ['Portail fournisseurs','Développement interne','Achats','SUPP_PROD','MySQL 8','Production','Mineur','25 Go',true,'Remplacé par l\'ERP',5,'Fonction native dans la cible'],
-    ['MES atelier','Éditeur industriel','Production','MES_PROD','Oracle 12c','Production','Critique','740 Go',true,'Conservé et interfacé',3,'Déclarations de production'],
-    ['Plateforme EDI','Opérateur EDI','Échanges partenaires','EDI_PROD','SQL Server 2019','Production','Majeur','95 Go',true,'Conservé et interfacé',9,'Formats à requalifier'],
-    ['Gestion de trésorerie','Éditeur finance','Trésorerie','TRESO_PROD','SQL Server 2019','Production','Majeur','60 Go',true,'Remplacé par l\'ERP',7,'Module natif retenu'],
-    ['Outil budgétaire','Développement interne','Contrôle de gestion','BUDGET_PROD','SQL Server 2016','Production','Mineur','15 Go',false,'À arbitrer',7,'Décision attendue en COPIL']
+    ['Gestion de trésorerie','Éditeur finance','Trésorerie','TRESO_PROD','SQL Server 2019','Production','Majeur','60 Go',true,'Remplacé par l\'ERP',7,'Module natif retenu']
   ].map(s=>({id:uid('sy'),nom:s[0],editeur:s[1],domaine:s[2],base:s[3],sgbd:s[4],environnement:s[5],
     criticite:s[6],volumetrie:s[7],interface:s[8],devenir:s[9],responsableId:A(s[10]),commentaire:s[11]}));
 
@@ -980,34 +979,13 @@ function seed(){
 
   const procCfg = [
     ['dm1','FIN','Comptabilité générale','copil','Standard','Critique',4,'Atelier FIN-1'],
-    ['dm1','FIN','Comptabilité auxiliaire','copil','Standard','Critique',4,'Atelier FIN-1'],
-    ['dm1','FIN','Immobilisations','metier','Paramétrage','Majeur',4,'Atelier FIN-2'],
     ['dm1','FIN','Clôture et reporting financier','metier','Paramétrage','Critique',7,'Atelier FIN-3'],
-    ['dm1','FIN','Trésorerie et moyens de paiement','arbitrage','Spécifique','Majeur',7,'Atelier FIN-4'],
-    ['dm1','FIN','Déclarations fiscales et TVA','atelier','Standard','Critique',7,''],
-    ['dm2','ACH','Référencement fournisseurs','copil','Standard','Majeur',5,'Atelier ACH-1'],
-    ['dm2','ACH','Demande d\'achat','copil','Paramétrage','Majeur',5,'Atelier ACH-1'],
     ['dm2','ACH','Commande d\'achat','metier','Standard','Critique',5,'Atelier ACH-2'],
-    ['dm2','ACH','Réception et service fait','arbitrage','Interface','Critique',6,'Atelier ACH-3'],
     ['dm2','ACH','Facturation fournisseur et rapprochement','atelier','Paramétrage','Critique',7,''],
-    ['dm3','SCM','Prévision de la demande','atelier','À qualifier','Majeur',6,''],
-    ['dm3','SCM','Planification des approvisionnements','atelier','Paramétrage','Critique',6,'Atelier SCM-1'],
     ['dm3','SCM','Gestion des stocks et emplacements','arbitrage','Interface','Critique',6,'Atelier SCM-2'],
-    ['dm3','SCM','Préparation et expédition','non','Interface','Majeur',6,''],
-    ['dm3','SCM','Inventaires','non','Standard','Majeur',6,''],
-    ['dm4','ADV','Devis et propositions commerciales','non','Interface','Mineur',1,''],
     ['dm4','ADV','Commande client','atelier','Standard','Critique',1,''],
-    ['dm4','ADV','Livraison et bons de livraison','non','Standard','Majeur',6,''],
-    ['dm4','ADV','Facturation client','atelier','Standard','Critique',7,''],
-    ['dm4','ADV','Recouvrement et relances','hors','Non couvert','Mineur',7,'Reste sur le CRM'],
     ['dm5','PRD','Nomenclatures et gammes','non','À qualifier','Majeur',3,''],
-    ['dm5','PRD','Ordres de fabrication','hors','Non couvert','Critique',3,'Conservé dans le MES'],
-    ['dm5','PRD','Déclarations d\'atelier','hors','Interface','Majeur',3,'Interface MES à maintenir'],
-    ['dm5','PRD','Contrôle qualité','non','À qualifier','Majeur',3,''],
-    ['dm6','REF','Référentiel articles','metier','Paramétrage','Critique',11,'Atelier REF-1'],
-    ['dm6','REF','Référentiel tiers','metier','Paramétrage','Critique',11,'Atelier REF-1'],
-    ['dm6','REF','Structure analytique et axes','arbitrage','Spécifique','Critique',7,'Atelier REF-2'],
-    ['dm6','REF','Habilitations et séparation des tâches','atelier','Paramétrage','Critique',3,'']
+    ['dm6','REF','Référentiel articles','metier','Paramétrage','Critique',11,'Atelier REF-1']
   ];
   const cpt={};
   const processus = procCfg.map(p=>{
@@ -1019,29 +997,14 @@ function seed(){
   const transformations = [
     ['dm2','Saisie des réceptions directement en entrepôt','Les réceptions saisies aujourd\'hui par le service achats passent aux équipes entrepôt, sur terminal mobile.','Processus','Fort','Magasiniers et approvisionneurs',45,'Accompagnement terrain','cours',6,'2027-09-30'],
     ['dm1','Rapprochement automatique des factures fournisseurs','Le contrôle manuel systématique disparaît au profit d\'un contrôle par exception.','Règles de gestion','Fort','Comptables fournisseurs',12,'Formation','cours',7,'2027-10-15'],
-    ['dm1','Clôture mensuelle raccourcie à 5 jours','Nouveau calendrier de clôture et nouvelles responsabilités de contrôle.','Organisation','Fort','Équipe comptable et contrôle de gestion',18,'Réunion d\'équipe','na',7,'2027-11-30'],
-    ['dm6','Création centralisée des articles','La création décentralisée disparaît, une cellule référentiel devient garante des données.','Organisation','Fort','Créateurs d\'articles dans 6 sites',30,'Key user relais','cours',11,'2027-06-30'],
-    ['dm3','Gestion des emplacements en temps réel','Les mouvements de stock sont tracés à l\'emplacement et non plus au magasin.','Outil','Moyen','Équipes logistique',60,'Formation','na',6,'2027-10-31'],
-    ['dm2','Demande d\'achat obligatoire avant engagement','Fin des commandes régularisées a posteriori.','Règles de gestion','Fort','Ensemble des prescripteurs',180,'Communication','na',5,'2027-12-15'],
-    ['dm4','Facturation client automatisée depuis les livraisons','Suppression de la double saisie entre livraison et facturation.','Processus','Moyen','Administration des ventes',14,'Formation','na',1,'2027-11-15'],
-    ['dm1','Analytique à trois axes obligatoire','Chaque écriture porte les axes site, activité et projet.','Données','Fort','Tous les valideurs de dépense',210,'Documentation','na',7,'2027-12-01'],
-    ['dm3','Inventaires tournants à la place de l\'inventaire annuel','Nouveau rythme et nouvelles responsabilités.','Organisation','Moyen','Responsables de magasin',9,'Accompagnement terrain','na',6,'2028-02-28'],
-    ['dm6','Habilitations revues selon la séparation des tâches','Certains agents perdent des accès qu\'ils avaient historiquement.','Compétences','Moyen','Utilisateurs ERP',260,'Communication','na',3,'2027-11-30'],
-    ['dm5','Déclarations de production intégrées à l\'ERP','Le flux MES alimente directement les stocks.','Outil','Faible','Chefs d\'équipe production',22,'Formation','na',3,'2027-12-10']
+    ['dm6','Création centralisée des articles','La création décentralisée disparaît, une cellule référentiel devient garante des données.','Organisation','Fort','Créateurs d\'articles dans 6 sites',30,'Key user relais','cours',11,'2027-06-30']
   ].map(t=>({id:uid('tf'),domaineId:t[0],titre:t[1],description:t[2],nature:t[3],impact:t[4],population:t[5],
     effectif:t[6],accompagnement:t[7],statut:t[8],responsableId:A(t[9]),echeance:t[10]}));
 
   const formations = [
     ['Navigation et principes généraux de l\'ERP','dm6','Tous utilisateurs','E-learning',1.5,260,4,10,'Septembre 2027',40,'cours',0],
     ['Comptabilité générale et auxiliaire','dm1','Comptables','Présentiel',14,18,3,7,'Novembre 2027',25,'na',0],
-    ['Clôture et reporting','dm1','Contrôle de gestion','Présentiel',7,12,2,7,'Novembre 2027',10,'na',0],
-    ['Demande et commande d\'achat','dm2','Prescripteurs et acheteurs','Distanciel',3.5,180,12,5,'Novembre 2027',30,'na',0],
-    ['Réception et service fait','dm2','Magasiniers','Atelier pratique',3.5,45,4,6,'Décembre 2027',15,'na',0],
-    ['Gestion des stocks et emplacements','dm3','Équipes logistique','Atelier pratique',7,60,6,6,'Décembre 2027',0,'na',0],
-    ['Commande client et facturation','dm4','Administration des ventes','Présentiel',7,14,2,1,'Décembre 2027',0,'na',0],
-    ['Référentiel articles et tiers','dm6','Cellule référentiel','Présentiel',7,8,1,11,'Octobre 2027',60,'cours',3],
-    ['Formation des key users référents','dm6','Key users','Présentiel',21,16,2,10,'Septembre 2027',70,'cours',9],
-    ['Restitutions et tableaux de bord','dm1','Encadrement','Distanciel',3.5,40,4,7,'Janvier 2028',0,'na',0]
+    ['Demande et commande d\'achat','dm2','Prescripteurs et acheteurs','Distanciel',3.5,180,12,5,'Novembre 2027',30,'na',0]
   ].map(f=>({id:uid('fo'),module:f[0],domaineId:f[1],public:f[2],format:f[3],duree:f[4],effectif:f[5],
     sessions:f[6],formateurId:A(f[7]),periode:f[8],supports:f[9],statut:f[10],formes:f[11]}));
 
@@ -1323,6 +1286,9 @@ function showLogin(err){
 
 /* ---------- helpers métier ---------- */
 const phaseById = id => state.phases.find(p=>p.id===id);
+const domaineById = id => state.domaines.find(d=>d.id===id);
+const processusById = id => state.processus.find(x=>x.id===id);
+function domaineDeAction(a){ if(a.domaineId) return a.domaineId; if(a.processusId){ const p=processusById(a.processusId); if(p) return p.domaineId; } return null; }
 const acteurById = id => state.acteurs.find(a=>a.id===id);
 const tacheById = id => state.taches.find(t=>t.id===id);
 const acteurNom = id => { const a=acteurById(id); return a? a.prenom+' '+a.nom : '—'; };
@@ -1362,7 +1328,6 @@ function dispoPct(acteurId,key){
   if(v===undefined||v===null||v==='') { const a=acteurById(acteurId); return a?a.dispoDefaut:0; }
   return Number(v);
 }
-function capaciteJours(acteurId,key){ return Math.round(workdaysInMonth(key)*dispoPct(acteurId,key)/100*10)/10; }
 function chargeParMois(){ // {acteurId|key: jours}
   const out={};
   state.taches.forEach(t=>{
@@ -1434,6 +1399,7 @@ const VUES = [
   {id:'bascule',  g:'Préparation bascule',nom:'Actions par donnée',titre:'Préparation de la bascule — actions par donnée'},
   {id:'planbascule',g:'Préparation bascule',nom:'Plan de bascule',titre:'Plan de bascule'},
   {id:'repetitions',g:'Préparation bascule',nom:'Répétitions',titre:'Répétitions de bascule'},
+  {id:'success',  g:'Bilan',nom:'Success',titre:'Success — actions clôturées'},
   {id:'feedback', g:'Contribuer',nom:'Proposer une amélioration',titre:'Proposer une amélioration ou signaler un bug'}
 ];
 const navOpen = new Set();
@@ -1481,7 +1447,7 @@ function render(){
     admin:renderAdmin,perimetre:renderPerimetre,transfo:renderTransfo,formation:renderFormation,
     comm:renderComm,budget:renderBudget,contrat:renderContrat,tdb:renderTDB,cible:renderCible,real:renderReal,
     demandes:renderDemandes,vunit:renderVUnit,vcomplete:renderVComplete,roles:renderRoles,planform:renderPlanForm,
-    donnees:renderDonnees,bascule:renderBascule,planbascule:renderPlanBascule,repetitions:renderRepetitions,feedback:renderFeedback})[vue]||(()=>{}))();
+    donnees:renderDonnees,bascule:renderBascule,planbascule:renderPlanBascule,repetitions:renderRepetitions,feedback:renderFeedback,success:renderSuccess})[vue]||(()=>{}))();
 }
 function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1800); }
 
@@ -1534,6 +1500,7 @@ function phaseRows(detail){
   });
   return out;
 }
+/* === TABLEAU DE BORD === */
 function renderDashboard(){
   const feuilles = state.taches.filter(t=>!estParent(t.id)&&t.type!=='jalon');
   const avg = feuilles.length? Math.round(feuilles.reduce((s,t)=>s+(t.avancement||0),0)/feuilles.length):0;
@@ -1910,7 +1877,77 @@ function dialogImportActions(){
     render();
   };
 }
+let planDomFiltre=null;   // {q, dateDe, dateA, resp:[...], dom:[...]} — initialisé au premier affichage
+function initPlanDomFiltre(){
+  const me=monActeurId(); const a=me?acteurById(me):null;
+  planDomFiltre = { q:'', dateDe:'', dateA:'', resp:[], dom:(a&&a.domainePrincipalId)?[a.domainePrincipalId]:[] };
+}
+/* === PLAN D'ACTION & GANTT (WBS) === */
 function renderPlan(){
+  subtabView('view-plan','plan',[
+    {id:'principale',nom:'Vue principale',run:m=>renderPlanPrincipal(m)},
+    {id:'domaine',nom:'Par domaine',run:m=>renderPlanDomaine(m)}
+  ]);
+}
+function multiSelect(id, label, options, selected, width){
+  return `<label class="f" style="min-width:${width||170}px"><span>${esc(label)}</span>
+    <select id="${id}" multiple size="4" style="height:auto">${options.map(([v,l])=>`<option value="${v}" ${selected.includes(v)?'selected':''}>${esc(l)}</option>`).join('')}</select></label>`;
+}
+function renderPlanDomaine(mount){
+  if(!planDomFiltre) initPlanDomFiltre();
+  const f=planDomFiltre;
+  const visibles = state.actions.filter(a=>{
+    const dm = domaineDeAction(a);
+    if(f.dom.length && !dm) return false;
+    if(f.dom.length && !f.dom.includes(dm)) return false;
+    if(f.resp.length && !f.resp.includes(a.responsableId||'')) return false;
+    if(f.dateDe && (!a.echeance || a.echeance<f.dateDe)) return false;
+    if(f.dateA && (!a.echeance || a.echeance>f.dateA)) return false;
+    if(f.q && !(a.titre+' '+(a.detail||'')).toLowerCase().includes(f.q.toLowerCase())) return false;
+    return true;
+  });
+  const retard = a => a.statut!=='fait' && a.echeance && a.echeance<today();
+  const rows = visibles.slice().sort((a,b)=>(a.echeance||'9').localeCompare(b.echeance||'9')).map(a=>{
+    const dm=domaineDeAction(a), dom=dm?domaineById(dm):null, sec=state.sections.find(s=>s.id===a.sectionId);
+    return `<tr>
+      <td><input type="checkbox" class="chk" data-done="${a.id}" ${a.statut==='fait'?'checked':''} title="Marquer comme terminée"></td>
+      <td><div style="${a.statut==='fait'?'text-decoration:line-through;color:var(--ink-3)':''}">${esc(a.titre)}</div>
+          <div class="muted" style="font-size:11px">${sec?esc(sec.nom):''}</div></td>
+      <td>${dom?`<span class="tag" style="color:${dom.couleur}">${esc(dom.nom)}</span>`:'<span class="muted">—</span>'}</td>
+      <td>${esc(acteurNom(a.responsableId))}</td>
+      <td class="mono ${retard(a)?'overdue':''}">${fmtFR(a.echeance)}</td>
+      <td><span class="tag ${retard(a)?'tag--late':statutDef(a.statut).cls}">${retard(a)?'En retard':statutDef(a.statut).nom}</span></td>
+      <td><div style="display:flex;align-items:center;gap:7px"><div class="prog" style="flex:1"><i style="width:${a.avancement||0}%"></i></div><span class="mono" style="font-size:11px">${a.avancement||0}%</span></div></td>
+      <td><button class="btn btn--sm btn--ghost" data-editact="${a.id}">✎</button></td></tr>`;
+  }).join('');
+  $(mount).innerHTML = `
+    <div class="card"><div class="card__body" style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;padding:12px 14px">
+      <label class="f" style="min-width:220px"><span>Rechercher</span><input type="text" id="pdq" placeholder="Intitulé ou détail…" value="${esc(f.q)}"></label>
+      <label class="f"><span>Échéance de</span><input type="date" id="pdDe" value="${f.dateDe}"></label>
+      <label class="f"><span>Échéance à</span><input type="date" id="pdA" value="${f.dateA}"></label>
+      ${multiSelect('pdDom','Domaine(s)', state.domaines.slice().sort((a,b)=>a.ordre-b.ordre).map(d=>[d.id,d.nom]), f.dom, 190)}
+      ${multiSelect('pdResp','Responsable(s)', state.acteurs.map(a=>[a.id,a.prenom+' '+a.nom]), f.resp, 190)}
+      <div style="align-self:flex-end;display:flex;gap:8px"><button class="btn" id="pdReset">Réinitialiser</button></div>
+    </div></div>
+    <div class="card"><div class="card__head"><h2>${visibles.length} action(s)</h2></div>
+      ${rows? `<table class="tbl"><thead><tr><th style="width:26px"></th><th>Action</th><th style="width:150px">Domaine</th><th style="width:150px">Responsable</th>
+        <th style="width:104px">Échéance</th><th style="width:110px">Statut</th><th style="width:120px">Avancement</th><th style="width:56px"></th></tr></thead>
+        <tbody>${rows}</tbody></table>`
+      : '<div class="action-empty">Aucune action ne correspond à ces filtres.</div>'}</div>`;
+  $('#pdq').oninput=e=>{f.q=e.target.value; renderPlanDomaine(mount); $('#pdq').focus();};
+  $('#pdDe').onchange=e=>{f.dateDe=e.target.value; renderPlanDomaine(mount);};
+  $('#pdA').onchange=e=>{f.dateA=e.target.value; renderPlanDomaine(mount);};
+  $('#pdDom').onchange=e=>{f.dom=[...e.target.selectedOptions].map(o=>o.value); renderPlanDomaine(mount);};
+  $('#pdResp').onchange=e=>{f.resp=[...e.target.selectedOptions].map(o=>o.value); renderPlanDomaine(mount);};
+  $('#pdReset').onclick=()=>{ initPlanDomFiltre(); renderPlanDomaine(mount); };
+  $(mount).querySelectorAll('[data-editact]').forEach(b=>b.onclick=()=>editAction(b.dataset.editact));
+  $(mount).querySelectorAll('[data-done]').forEach(c=>c.onchange=()=>{
+    const a=state.actions.find(x=>x.id===c.dataset.done); if(!a) return;
+    a.statut = c.checked?'fait':'cours'; a.avancement = c.checked?100:a.avancement;
+    PERSIST.saveItem('actions', a).catch(e=>handleWriteError(e,'actions',a.id,a)); renderPlanDomaine(mount);
+  });
+}
+function renderPlanPrincipal(mount){
   const f=planFiltre;
   const visibles = state.actions.filter(a=>
     (f.statut==='all'||a.statut===f.statut) && (f.resp==='all'||a.responsableId===f.resp) &&
@@ -1947,7 +1984,7 @@ function renderPlan(){
     </div>`;
   }).join('');
 
-  $('#view-plan').innerHTML = `
+  $(mount).innerHTML = `
     <div class="card"><div class="card__body" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:11px 14px">
       <input type="text" id="pq" placeholder="Rechercher une action…" value="${esc(f.q)}" style="width:250px">
       <select id="pst" style="width:170px"><option value="all">Tous les statuts</option>${optStatuts(f.statut)}</select>
@@ -1966,7 +2003,7 @@ function renderPlan(){
   $('#btnNewSec').onclick=()=>editSection(null);
   $('#btnNewAct').onclick=()=>editAction(null,{sectionId:(state.sections[0]||{}).id});
   $('#btnImpAct').onclick=()=>dialogImportActions();
-  $('#view-plan').onclick=e=>{
+  $(mount).onclick=e=>{
     const t=e.target;
     if(t.dataset.addact) editAction(null,{sectionId:t.dataset.addact});
     if(t.dataset.editact) editAction(t.dataset.editact);
@@ -2003,7 +2040,7 @@ function editSection(id){
 }
 function editAction(id, defaults={}){
   const a = id? state.actions.find(x=>x.id===id) : {titre:'',detail:'',sectionId:(state.sections[0]||{}).id,
-    responsableId:null,echeance:addDays(today(),14),statut:'na',priorite:'m',avancement:0,tacheId:'',creeLe:today(),...defaults};
+    responsableId:null,echeance:addDays(today(),14),statut:'na',priorite:'m',avancement:0,tacheId:'',domaineId:null,processusId:'',creeLe:today(),...defaults};
   modal({titre:id?'Modifier l\'action':'Nouvelle action',
     extra:id?'<button class="btn btn--danger left" id="a_del">Supprimer</button>':'',
     corps:`
@@ -2022,12 +2059,17 @@ function editAction(id, defaults={}){
         <label class="f"><span>Avancement (%)</span><input type="number" id="a_av" min="0" max="100" step="5" value="${a.avancement||0}"></label>
         <label class="f"><span>Tâche WBS rattachée</span><select id="a_w"><option value="">— Aucune —</option>${
           state.taches.map(t=>`<option value="${t.id}" ${a.tacheId===t.id?'selected':''}>${esc(t.nom)}</option>`).join('')}</select></label>
+      </div>
+      <div class="grid2">
+        <label class="f"><span>Domaine métier</span><select id="a_dom"><option value="">— Aucun —</option>${state.domaines.slice().sort((x,y)=>x.ordre-y.ordre).map(d=>`<option value="${d.id}" ${a.domaineId===d.id?'selected':''}>${esc(d.nom)}</option>`).join('')}</select></label>
+        <label class="f"><span>Processus outillé lié</span><select id="a_proc"><option value="">— Aucun —</option>${state.processus.map(p=>`<option value="${p.id}" ${a.processusId===p.id?'selected':''}>${esc(p.code)} — ${esc(p.nom)}</option>`).join('')}</select></label>
       </div>`,
     onOk(r){
       const titre=$('#a_t',r).value.trim(); if(!titre){toast('Indiquez un intitulé.');return false;}
       const o={titre,detail:$('#a_d',r).value,sectionId:$('#a_s',r).value,responsableId:$('#a_r',r).value||null,
         echeance:$('#a_e',r).value,statut:$('#a_st',r).value,priorite:$('#a_p',r).value,
-        avancement:Number($('#a_av',r).value)||0,tacheId:$('#a_w',r).value};
+        avancement:Number($('#a_av',r).value)||0,tacheId:$('#a_w',r).value,
+        domaineId:$('#a_dom',r).value||null,processusId:$('#a_proc',r).value||''};
       o.maj=nowStamp(); const isNew=!id;
       const target = id? Object.assign({}, a, o) : Object.assign({id:uid('a'),creeLe:today()}, o);
       commitEntity('actions', target, isNew, isNew?'Action ajoutée':'Action modifiée');
@@ -2086,6 +2128,7 @@ function renderPlanCharge(mount){
     preserveMatrix(mount, `[data-cp="${inp.dataset.cp}"][data-k="${inp.dataset.k}"]`, ()=>renderPlanCharge(mount));
   }; });
 }
+/* === ACTEURS & CHARGE === */
 function renderActeurs(){
   subtabView('view-acteurs','acteurs',[
     {id:'liste',nom:'Acteurs',run:m=>renderActeursListe(m)},
@@ -2101,22 +2144,26 @@ function renderActeursListe(mount){
       <div class="card__head"><h2>Équipe projet — ${state.acteurs.length} acteurs</h2>
         <button class="btn btn--primary" id="btnNewAct2">Ajouter un acteur</button></div>
       <table class="tbl">
-        <thead><tr><th>Nom</th><th>Rôle</th><th>Organisation</th><th>Contact</th>
-          <th class="num">TJM</th><th class="num">Dispo. par défaut</th><th class="num">Charge affectée</th><th class="num">Coût estimé</th><th></th></tr></thead>
+        <thead><tr><th>Nom</th><th>Rôle</th><th>Employeur</th><th>Domaine principal</th><th>Population</th><th>Compte lié</th>
+          <th class="num">TJM</th><th class="num">Dispo. par défaut</th><th class="num">Charge affectée</th><th></th></tr></thead>
         <tbody>${state.acteurs.map(a=>{
           const ch=Math.round(totalCharge[a.id]||0);
+          const dom=a.domainePrincipalId?domaineById(a.domainePrincipalId):null;
+          const prof=profilPourActeur(a);
           return `<tr style="${a.actif?'':'opacity:.5'}">
-            <td><strong>${esc(a.prenom)} ${esc(a.nom)}</strong>${a.actif?'':' <span class="tag">Inactif</span>'}</td>
-            <td>${esc(a.role)}</td><td><span class="tag">${esc(a.organisation)}</span></td>
-            <td class="muted mono" style="font-size:11px">${esc(a.email)}</td>
+            <td><strong>${esc(a.prenom)} ${esc(a.nom)}</strong>${a.actif?'':' <span class="tag">Inactif</span>'}
+              <div class="muted mono" style="font-size:10.5px">${esc(a.email)}</div></td>
+            <td>${esc(a.role)}<div class="muted" style="font-size:10.5px">${esc(a.organisation)}</div></td>
+            <td>${esc(a.employeur||'—')}</td>
+            <td>${dom?`<span class="tag" style="color:${dom.couleur}">${esc(dom.nom)}</span>`:'<span class="muted">—</span>'}</td>
+            <td>${populationTag(a.population)}</td>
+            <td>${prof?`<span class="mono" style="font-size:11px">${esc(prof.email)}</span> <span class="ub-role${prof.role==='lecteur'?' ub-role--ro':''}" style="margin-left:3px">${esc(prof.role)}</span>`:'<span class="muted">Non lié</span>'}</td>
             <td class="num">${a.tjm? a.tjm+' '+state.params.devise : '—'}</td>
             <td class="num">${a.dispoDefaut} %</td>
             <td class="num">${ch} j</td>
-            <td class="num">${a.tjm? (ch*a.tjm).toLocaleString('fr-FR')+' '+state.params.devise : '—'}</td>
             <td><button class="btn btn--sm btn--ghost" data-eda="${a.id}">✎</button></td></tr>`;}).join('')}</tbody>
-        <tfoot><tr><th colspan="6" style="text-align:right">Total</th>
-          <th class="num">${Math.round(Object.values(totalCharge).reduce((s,v)=>s+v,0))} j</th>
-          <th class="num">${state.acteurs.reduce((s,a)=>s+(a.tjm||0)*(totalCharge[a.id]||0),0).toLocaleString('fr-FR',{maximumFractionDigits:0})} ${state.params.devise}</th><th></th></tr></tfoot>
+        <tfoot><tr><th colspan="8" style="text-align:right">Total</th>
+          <th class="num">${Math.round(Object.values(totalCharge).reduce((s,v)=>s+v,0))} j</th><th></th></tr></tfoot>
       </table>
     </div>
     <div class="card"><div class="card__head"><h2>Absences et indisponibilités</h2>
@@ -2135,8 +2182,32 @@ function renderActeursListe(mount){
     if(e.target.dataset.delabs){ deleteEntity('absences', e.target.dataset.delabs); }
   };
 }
+let profilsCache=null;
+async function chargerProfilsCache(){
+  if(PERSIST.mode!=='cloud' || !DB.listProfiles) return null;
+  try{ profilsCache = await DB.listProfiles(); return profilsCache; }catch(e){ return null; }
+}
+function profilPourActeur(a){
+  if(!profilsCache || !a) return null;
+  return profilsCache.find(p=>p.acteur_id===a.id) || null;
+}
+function liensCompteHTML(a){
+  if(PERSIST.mode!=='cloud') return '';
+  const prof = profilPourActeur(a);
+  const dom = a.domainePrincipalId? domaineById(a.domainePrincipalId) : null;
+  if(!prof) return `<div class="card__body" style="padding:10px 0 0"><p class="hint" style="margin:0">Aucun compte de connexion rattaché. Le rattachement se fait désormais dans Administration → Utilisateurs et rôles (choisissez cet acteur en face du compte concerné) — l'e-mail ci-dessus ne sert plus au lien.</p></div>`;
+  return `<div class="card__body" style="padding:10px 0 0">
+    <div class="lien-compte">
+      <span class="mono" style="font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)">Compte lié</span>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:4px;flex-wrap:wrap">
+        <span class="mono" style="font-size:12.5px">${esc(prof.email)}</span>
+        <span class="ub-role${prof.role==='lecteur'?' ub-role--ro':''}">${esc(prof.role)}</span>
+        ${dom?`<span class="tag" style="color:${dom.couleur}">${esc(dom.nom)}</span>`:''}
+      </div>
+    </div></div>`;
+}
 function editActeur(id){
-  const a = id? acteurById(id) : {prenom:'',nom:'',role:'',organisation:'Interne',email:'',tjm:0,dispoDefaut:100,actif:true};
+  const a = id? acteurById(id) : {prenom:'',nom:'',role:'',organisation:'Interne',employeur:'',email:'',tjm:0,dispoDefaut:100,actif:true,domainePrincipalId:null,population:'contributeur'};
   modal({titre:id?'Modifier l\'acteur':'Nouvel acteur',
     extra:id?'<button class="btn btn--danger left" id="ac_del">Retirer du projet</button>':'',
     corps:`<div class="grid2">
@@ -2145,17 +2216,25 @@ function editActeur(id){
       <div class="grid2">
       <label class="f"><span>Rôle sur le projet</span><input type="text" id="c_r" value="${esc(a.role)}" placeholder="Ex. Key user Finance"></label>
       <label class="f"><span>Organisation</span><select id="c_o">${ORGAS.map(o=>`<option ${a.organisation===o?'selected':''}>${o}</option>`).join('')}</select></label></div>
+      <div class="grid2">
+      <label class="f"><span>Employeur (société)</span><input type="text" id="c_emp" value="${esc(a.employeur||'')}" placeholder="Ex. Client SA, Cabinet XYZ…"></label>
+      <label class="f"><span>Domaine principal</span><select id="c_dp"><option value="">— Aucun —</option>${state.domaines.slice().sort((x,y)=>x.ordre-y.ordre).map(d=>`<option value="${d.id}" ${a.domainePrincipalId===d.id?'selected':''}>${esc(d.nom)}</option>`).join('')}</select></label></div>
+      <label class="f"><span>Population (rôle fonctionnel)</span><select id="c_pop">${POPULATIONS.map(p=>`<option value="${p.v}" ${(a.population||'contributeur')===p.v?'selected':''}>${esc(p.l)}</option>`).join('')}</select></label>
+      <p class="hint" style="margin-top:-6px">Gouverne la vue d'entrée et le périmètre de navigation proposés à cet acteur une fois connecté. Distinct du rôle technique (lecteur/éditeur/admin), qui reste géré dans Utilisateurs et rôles.</p>
       <label class="f"><span>Courriel</span><input type="email" id="c_e" value="${esc(a.email)}"></label>
-      <label class="f"><span>E-mail de connexion (si différent)</span><input type="email" id="c_ae" value="${esc(a.authEmail||'')}" placeholder="Compte utilisé pour se connecter à l\'outil"></label>
+      <label class="f"><span>E-mail de connexion (information — le rattachement à un compte se fait désormais dans Utilisateurs et rôles)</span><input type="email" id="c_ae" value="${esc(a.authEmail||'')}" placeholder="Compte utilisé pour se connecter à l\'outil"></label>
       <div class="grid3">
       <label class="f"><span>TJM (${state.params.devise})</span><input type="number" id="c_t" min="0" step="10" value="${a.tjm}"></label>
       <label class="f"><span>Disponibilité par défaut (%)</span><input type="number" id="c_d" min="0" max="100" step="5" value="${a.dispoDefaut}"></label>
       <label class="f"><span>Statut</span><select id="c_a"><option value="1" ${a.actif?'selected':''}>Actif</option><option value="0" ${a.actif?'':'selected'}>Inactif</option></select></label></div>
-      <p class="hint">La disponibilité par défaut s'applique à tous les mois non renseignés dans l'écran Disponibilités.</p>`,
+      <p class="hint">La disponibilité par défaut s'applique à tous les mois non renseignés dans l'écran Disponibilités.</p>
+      ${liensCompteHTML(a)}`,
     onOk(r){
       const o={prenom:$('#c_p',r).value.trim(),nom:$('#c_n',r).value.trim(),role:$('#c_r',r).value.trim(),
-        organisation:$('#c_o',r).value,email:$('#c_e',r).value.trim(),tjm:Number($('#c_t',r).value)||0,
+        organisation:$('#c_o',r).value,employeur:$('#c_emp',r).value.trim(),email:$('#c_e',r).value.trim(),tjm:Number($('#c_t',r).value)||0,
         dispoDefaut:Number($('#c_d',r).value)||0,actif:$('#c_a',r).value==='1',
+        domainePrincipalId:$('#c_dp',r).value||null,
+        population:$('#c_pop',r).value||'contributeur',
         authEmail:($('#c_ae',r)?$('#c_ae',r).value.trim():a.authEmail||'')};
       if(!o.nom&&!o.prenom){toast('Indiquez au moins un nom.');return false;}
       o.maj=nowStamp(); const isNew=!id;
@@ -2251,6 +2330,7 @@ function renderDispo(){
    ADMINISTRATION
    ============================================================ */
 const JOURS=['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'];
+/* === ACCÈS & ADMINISTRATION (cf. Lot 1a — socle accès) === */
 function renderAdmin(){
   const p=state.projet, pa=state.params;
   $('#view-admin').innerHTML=`
@@ -2853,6 +2933,28 @@ function avancementDomaine(dId){
   if(!ps.length) return 0;
   return Math.round(ps.reduce((s,p)=>s+validDef(p.statut).poids,0)/ps.length);
 }
+function mesActionsOuvertes(){
+  const me=monActeurId(); if(!me) return [];
+  return state.actions.filter(a=>a.responsableId===me && a.statut!=='fait');
+}
+function actionsDeMonDomaine(){
+  const me=monActeurId(); const a=me?acteurById(me):null;
+  if(!a || !a.domainePrincipalId) return [];
+  return state.actions.filter(x=>x.statut!=='fait' && domaineDeAction(x)===a.domainePrincipalId);
+}
+function miniActionsCard(titre, list, vide){
+  if(!list.length) return '';
+  const retard=a=>a.statut!=='fait'&&a.echeance&&a.echeance<today();
+  return `<div class="card"><div class="card__head"><h2>${esc(titre)}</h2><span class="section__count">${list.length}</span></div>
+    <table class="tbl"><thead><tr><th>Action</th><th style="width:140px">Domaine</th><th style="width:104px">Échéance</th><th style="width:110px">Statut</th><th style="width:56px"></th></tr></thead>
+    <tbody>${list.slice().sort((a,b)=>(a.echeance||'9').localeCompare(b.echeance||'9')).map(a=>{
+      const dm=domaineDeAction(a), dom=dm?domaineById(dm):null;
+      return `<tr><td>${esc(a.titre)}</td><td>${dom?`<span class="tag" style="color:${dom.couleur}">${esc(dom.nom)}</span>`:'—'}</td>
+        <td class="mono ${retard(a)?'overdue':''}">${fmtFR(a.echeance)}</td>
+        <td><span class="tag ${retard(a)?'tag--late':statutDef(a.statut).cls}">${retard(a)?'En retard':statutDef(a.statut).nom}</span></td>
+        <td><button class="btn btn--sm btn--ghost" data-editact="${a.id}">✎</button></td></tr>`;}).join('')}</tbody></table></div>`;
+}
+/* === PÉRIMÈTRE MÉTIER — domaines & processus (cf. Lot 1b — domaineId) === */
 function renderPerimetre(){
   const ps=state.processus.filter(p=>p.statut!=='hors');
   const global = ps.length? Math.round(ps.reduce((s,p)=>s+validDef(p.statut).poids,0)/ps.length):0;
@@ -2893,15 +2995,20 @@ function renderPerimetre(){
       <span class="mono">${global} %</span>
       <div style="display:flex;gap:8px;margin-left:14px">
         <button class="btn" id="pe_csv">Exporter en CSV</button>
+        <button class="btn" id="pe_addact">Ajouter une action</button>
         <button class="btn btn--primary" id="pe_adddom">Ajouter un domaine</button>
       </div>
     </div></div>
+    ${miniActionsCard('Relevé — actions qui me sont affectées', mesActionsOuvertes())}
+    ${miniActionsCard('À suivre — actions nécessaires à mon domaine', actionsDeMonDomaine())}
     <div class="legend" style="margin:0 0 14px">${VALID.map(v=>`<span><i class="lg ${v.cls}"></i>${v.nom}</span>`).join('')}</div>
     <div class="bricks">${briques}</div>`;
 
   $('#pe_adddom').onclick=()=>editDomaine(null);
+  $('#pe_addact').onclick=()=>editAction(null,{});
   $('#pe_csv').onclick=()=>exportCSV('perimetre');
   $('#view-perimetre').onclick=e=>{
+    const ea=e.target.closest('[data-editact]'); if(ea){ editAction(ea.dataset.editact); return; }
     const b=e.target.closest('[data-eddom],[data-addproc],[data-edproc]'); if(!b) return;
     if(b.dataset.eddom) editDomaine(b.dataset.eddom);
     else if(b.dataset.addproc) editProcessus(null,{domaineId:b.dataset.addproc});
@@ -2973,6 +3080,7 @@ const NATURES=['Processus','Organisation','Outil','Données','Compétences','Rè
 const IMPACTS=['Fort','Moyen','Faible'];
 const LEVIERS=['Formation','Communication','Accompagnement terrain','Documentation','Réunion d\'équipe','Key user relais'];
 let tfFiltre={dom:'all',impact:'all'};
+/* === CONDUITE DU CHANGEMENT — transformations & formation === */
 function renderTransfo(){
   const domNom=id=>(state.domaines.find(d=>d.id===id)||{}).nom||'Transverse';
   const list=state.transformations.filter(t=>(tfFiltre.dom==='all'||t.domaineId===tfFiltre.dom)&&(tfFiltre.impact==='all'||t.impact===tfFiltre.impact));
@@ -3503,105 +3611,46 @@ function seedExtra(A,domaines){
   const stamp=arr=>arr.map(o=>({id:uid('r'),maj:ns,creeLe:today(),...o}));
   const commGroupes=stamp([
     {nom:'Comité de pilotage',type:'Comité de pilotage',canal:'COPIL mensuel présentiel',frequence:'Mensuelle',membres:8,responsableId:A(0),objectif:'Arbitrer, valider les jalons et le budget.'},
-    {nom:'Sponsors',type:'Sponsors',canal:'Point trimestriel + note de synthèse',frequence:'Trimestrielle',membres:3,responsableId:A(0),objectif:'Porter le projet au plus haut niveau et lever les obstacles.'},
-    {nom:'Équipe projet cœur',type:'Équipe projet',canal:'Stand-up + Teams',frequence:'Hebdomadaire',membres:12,responsableId:A(1),objectif:'Coordonner l\'avancement opérationnel.'},
-    {nom:'Key users',type:'Key users',canal:'Atelier + newsletter',frequence:'Bi-mensuelle',membres:9,responsableId:A(10),objectif:'Concevoir la cible et relayer vers les métiers.'},
-    {nom:'End users',type:'End users',canal:'Newsletter + intranet',frequence:'Mensuelle',membres:260,responsableId:A(10),objectif:'Informer, préparer et rassurer les utilisateurs finaux.'}]);
+    {nom:'Équipe projet cœur',type:'Équipe projet',canal:'Stand-up + Teams',frequence:'Hebdomadaire',membres:12,responsableId:A(1),objectif:'Coordonner l\'avancement opérationnel.'}]);
   const evenements=stamp([
-    {titre:'Petit-déjeuner de lancement',type:'Kick-off',date:'2026-01-15',lieu:'Siège — hall',participants:'Toute l\'équipe',organisateurId:A(0),statut:'fait',note:'Présentation de la vision et de l\'équipe.'},
-    {titre:'Séminaire de conception',type:'Séminaire',date:'2026-06-18',lieu:'Domaine de la Vallée',participants:'Équipe + key users',organisateurId:A(1),statut:'na',note:'Deux jours pour figer la cible.'},
-    {titre:'Célébration du gel du périmètre',type:'Célébration jalon',date:'2026-11-05',lieu:'Rooftop',participants:'Équipe projet',organisateurId:A(10),statut:'na',note:''},
-    {titre:'Team building mi-parcours',type:'Team building',date:'2027-03-20',lieu:'Base de loisirs',participants:'Équipe étendue',organisateurId:A(10),statut:'na',note:''},
-    {titre:'Soirée de mise en production',type:'Célébration jalon',date:'2028-01-12',lieu:'À définir',participants:'Tous',organisateurId:A(0),statut:'na',note:'Fêter le démarrage réussi.'}]);
+    {titre:'Petit-déjeuner de lancement',type:'Kick-off',date:'2026-01-15',lieu:'Siège — hall',participants:'Toute l\'équipe',organisateurId:A(0),statut:'fait',note:'Présentation de la vision et de l\'équipe.'}]);
   const regles=stamp([
     {theme:'Réactivité',regle:'Réponse aux sollicitations projet',engagement:'Sous 48 h ouvrées',niveau:'48 h',garantId:A(0),detail:'Toute question adressée via l\'outil reçoit une réponse ou un accusé sous 48 h.'},
-    {theme:'Réactivité',regle:'Traitement d\'une anomalie bloquante en recette',engagement:'Prise en charge le jour même',niveau:'24 h',garantId:A(2),detail:''},
-    {theme:'Disponibilité',regle:'Présence des key users aux ateliers',engagement:'80 % du temps sur les créneaux planifiés',niveau:'Best effort',garantId:A(1),detail:'Un suppléant est désigné pour chaque key user.'},
-    {theme:'Décision',regle:'Arbitrage des points ouverts en COPIL',engagement:'Décision formalisée sous 1 semaine',niveau:'1 semaine',garantId:A(0),detail:''},
-    {theme:'Escalade',regle:'Remontée d\'un risque majeur',engagement:'Immédiate vers le directeur de programme',niveau:'Immédiat',garantId:A(0),detail:''},
-    {theme:'Communication',regle:'Diffusion du relevé de décisions',engagement:'Sous 72 h après chaque instance',niveau:'72 h',garantId:A(1),detail:''}]);
+    {theme:'Escalade',regle:'Remontée d\'un risque majeur',engagement:'Immédiate vers le directeur de programme',niveau:'Immédiat',garantId:A(0),detail:''}]);
   const budget=stamp([
     {poste:'Licences ERP (souscription)',categorie:'Licences',montantPrevu:1200000,montantEngage:1200000,montantRealise:400000,responsableId:A(0),statut:'cours',commentaire:'Abonnement pluriannuel.'},
     {poste:'Prestation d\'intégration',categorie:'Intégration',montantPrevu:2800000,montantEngage:2450000,montantRealise:900000,responsableId:A(2),statut:'cours',commentaire:''},
-    {poste:'Équipe interne dédiée',categorie:'Interne',montantPrevu:1450000,montantEngage:1450000,montantRealise:520000,responsableId:A(0),statut:'cours',commentaire:'Coût complet mobilisation.'},
-    {poste:'Infrastructure et hébergement',categorie:'Infrastructure',montantPrevu:420000,montantEngage:300000,montantRealise:110000,responsableId:A(3),statut:'cours',commentaire:''},
-    {poste:'Conduite du changement et formation',categorie:'Conduite du changement',montantPrevu:520000,montantEngage:180000,montantRealise:40000,responsableId:A(10),statut:'cours',commentaire:''},
-    {poste:'Reprise et qualité des données',categorie:'Reprise de données',montantPrevu:380000,montantEngage:210000,montantRealise:90000,responsableId:A(11),statut:'cours',commentaire:''},
     {poste:'Provision pour aléas',categorie:'Aléas',montantPrevu:600000,montantEngage:0,montantRealise:0,responsableId:A(0),statut:'na',commentaire:'8 % de l\'enveloppe.'}]);
   const realisation=stamp([
     {titre:'Paramétrage du plan comptable',categorie:'Conception & paramétrage',domaineId:D(0),reference:'PAR-FIN-01',complexite:'Moyenne',charge:20,avancement:70,responsableId:A(7),statut:'cours',echeance:'2026-12-15',specification:''},
-    {titre:'Paramétrage des circuits d\'achat',categorie:'Conception & paramétrage',domaineId:D(1),reference:'PAR-ACH-01',complexite:'Forte',charge:35,avancement:30,responsableId:A(8),statut:'cours',echeance:'2027-01-30',specification:''},
     {titre:'Interface bancaire (paiements)',categorie:'Interface',domaineId:D(0),reference:'ITF-01',complexite:'Forte',charge:40,avancement:20,responsableId:A(9),statut:'cours',echeance:'2027-03-31',specification:''},
-    {titre:'Interface EDI commandes',categorie:'Interface',domaineId:D(1),reference:'ITF-02',complexite:'Forte',charge:35,avancement:10,responsableId:A(9),statut:'na',echeance:'2027-03-15',specification:''},
-    {titre:'Interface WMS mouvements de stock',categorie:'Interface',domaineId:D(2),reference:'ITF-03',complexite:'Forte',charge:45,avancement:5,responsableId:A(9),statut:'na',echeance:'2027-04-30',specification:''},
-    {titre:'Workflow de validation des demandes d\'achat',categorie:'Workflow',domaineId:D(1),reference:'WF-01',complexite:'Moyenne',charge:15,avancement:15,responsableId:A(8),statut:'cours',echeance:'2027-02-15',specification:''},
-    {titre:'Workflow d\'approbation des factures',categorie:'Workflow',domaineId:D(0),reference:'WF-02',complexite:'Moyenne',charge:15,avancement:0,responsableId:A(7),statut:'na',echeance:'2027-02-28',specification:''},
-    {titre:'États de stock temps réel',categorie:'Rapport opérationnel',domaineId:D(2),reference:'RPT-OP-01',complexite:'Moyenne',charge:12,avancement:0,responsableId:A(8),statut:'na',echeance:'2027-04-15',specification:''},
-    {titre:'Balance âgée fournisseurs',categorie:'Rapport opérationnel',domaineId:D(0),reference:'RPT-OP-02',complexite:'Faible',charge:6,avancement:0,responsableId:A(7),statut:'na',echeance:'2027-03-30',specification:''},
-    {titre:'Tableau de bord achats',categorie:'Rapport analytique',domaineId:D(1),reference:'RPT-AN-01',complexite:'Moyenne',charge:18,avancement:0,responsableId:A(3),statut:'na',echeance:'2027-05-15',specification:''},
-    {titre:'Reporting financier consolidé',categorie:'Rapport analytique',domaineId:D(0),reference:'RPT-AN-02',complexite:'Forte',charge:30,avancement:0,responsableId:A(3),statut:'na',echeance:'2027-05-28',specification:''},
-    {titre:'États réglementaires TVA',categorie:'Développement spécifique',domaineId:D(0),reference:'SPE-01',complexite:'Forte',charge:25,avancement:0,responsableId:A(9),statut:'na',echeance:'2027-05-14',specification:'Format légal spécifique.'},
-    {titre:'Calcul spécifique de valorisation des stocks',categorie:'Développement spécifique',domaineId:D(2),reference:'SPE-02',complexite:'Forte',charge:22,avancement:0,responsableId:A(9),statut:'na',echeance:'2027-04-30',specification:''}]);
+    {titre:'Workflow de validation des demandes d\'achat',categorie:'Workflow',domaineId:D(1),reference:'WF-01',complexite:'Moyenne',charge:15,avancement:15,responsableId:A(8),statut:'cours',echeance:'2027-02-15',specification:''}]);
   const demandes=stamp([
     {ref:'DEM-001',titre:'Ajouter un axe analytique « projet »',nature:'Évolution',domaineId:D(0),criticite:'Majeur',responsableId:A(3),statut:'cours',echeance:'2026-11-30',detail:'Demandé par le contrôle de gestion.'},
-    {ref:'DEM-002',titre:'Écart sur la numérotation des commandes',nature:'Écart de conception',domaineId:D(1),criticite:'Majeur',responsableId:A(8),statut:'risq',echeance:'2026-10-31',detail:''},
-    {ref:'DEM-003',titre:'Clarifier la gestion des acomptes fournisseurs',nature:'Question',domaineId:D(0),criticite:'Mineur',responsableId:A(7),statut:'cours',echeance:'2026-11-15',detail:''},
-    {ref:'DEM-004',titre:'Décision sur le maintien de l\'outil budgétaire',nature:'Décision',domaineId:D(0),criticite:'Majeur',responsableId:A(0),statut:'na',echeance:'2026-12-15',detail:''},
-    {ref:'DEM-005',titre:'Correction du mapping des unités de mesure',nature:'Correction',domaineId:D(2),criticite:'Critique',responsableId:A(11),statut:'fait',echeance:'2026-09-30',detail:'Corrigé lors de la reprise à blanc n°1.'},
-    {ref:'DEM-006',titre:'Ajouter le contrôle budgétaire à l\'engagement',nature:'Évolution',domaineId:D(1),criticite:'Majeur',responsableId:A(8),statut:'fait',echeance:'2026-08-31',detail:''}]);
+    {ref:'DEM-002',titre:'Écart sur la numérotation des commandes',nature:'Écart de conception',domaineId:D(1),criticite:'Majeur',responsableId:A(8),statut:'risq',echeance:'2026-10-31',detail:''}]);
   const documents=stamp([
-    {titre:'Dossier de conception générale',domaineId:null,type:'Note de cadrage',version:'1.2',auteurId:A(1),statut:'fait',lien:'GED · /conception/DCG',resume:''},
-    {titre:'Conception détaillée Finance',domaineId:D(0),type:'Dossier de conception détaillée',version:'0.9',auteurId:A(7),statut:'cours',lien:'',resume:''},
-    {titre:'Conception détaillée Achats',domaineId:D(1),type:'Dossier de conception détaillée',version:'0.8',auteurId:A(8),statut:'cours',lien:'',resume:''},
-    {titre:'Conception détaillée Supply Chain',domaineId:D(2),type:'Dossier de conception détaillée',version:'0.5',auteurId:A(8),statut:'cours',lien:'',resume:''},
-    {titre:'Spécification interface EDI',domaineId:D(1),type:'Spécification d\'interface',version:'1.0',auteurId:A(9),statut:'metier',lien:'',resume:''},
-    {titre:'Spécification interface WMS',domaineId:D(2),type:'Spécification d\'interface',version:'0.7',auteurId:A(9),statut:'cours',lien:'',resume:''}]);
+    {titre:'Dossier de conception générale',domaineId:null,type:'Note de cadrage',version:'1.2',auteurId:A(1),statut:'fait',lien:'GED · /conception/DCG',resume:''}]);
   const attendus=stamp([
     {titre:'Clôture mensuelle en 5 jours ouvrés',domaineId:D(0),nature:'Gain de délai',indicateur:'Délai de clôture',cible:'5 jours',responsableId:A(0),commentaire:'Contre 9 jours aujourd\'hui.'},
-    {titre:'Rapprochement automatique des factures',domaineId:D(0),nature:'Gain de qualité',indicateur:'Taux d\'automatisation',cible:'85 %',responsableId:A(7),commentaire:''},
-    {titre:'Taux de commandes sur engagement préalable',domaineId:D(1),nature:'Conformité',indicateur:'Commandes régularisées',cible:'< 5 %',responsableId:A(8),commentaire:''},
-    {titre:'Fiabilité des stocks',domaineId:D(2),nature:'Gain de qualité',indicateur:'Écart d\'inventaire',cible:'< 1 %',responsableId:A(6),commentaire:''},
-    {titre:'Unicité du référentiel articles',domaineId:D(5),nature:'Maîtrise du risque',indicateur:'Taux de doublons',cible:'< 0,5 %',responsableId:A(11),commentaire:''},
-    {titre:'Satisfaction des utilisateurs à 3 mois',domaineId:null,nature:'Satisfaction utilisateur',indicateur:'Enquête post-démarrage',cible:'> 70 %',responsableId:A(10),commentaire:''}]);
+    {titre:'Unicité du référentiel articles',domaineId:D(5),nature:'Maîtrise du risque',indicateur:'Taux de doublons',cible:'< 0,5 %',responsableId:A(11),commentaire:''}]);
   const roles=stamp([
     {code:'FIN_COMPTA',nom:'Comptable général et auxiliaire',domaineId:D(0),criticite:'Critique',nbUtilisateurs:14,sod:true,responsableId:A(7),statut:'cours',description:'Saisie et lettrage, hors validation de paiement.'},
-    {code:'FIN_TRESO',nom:'Trésorier',domaineId:D(0),criticite:'Critique',nbUtilisateurs:3,sod:true,responsableId:A(7),statut:'na',description:'Validation des paiements.'},
-    {code:'FIN_CDG',nom:'Contrôleur de gestion',domaineId:D(0),criticite:'Majeur',nbUtilisateurs:6,sod:false,responsableId:A(3),statut:'cours',description:'Consultation et reporting.'},
-    {code:'ACH_ACHETEUR',nom:'Acheteur',domaineId:D(1),criticite:'Majeur',nbUtilisateurs:22,sod:true,responsableId:A(8),statut:'cours',description:'Commandes dans la limite de délégation.'},
-    {code:'ACH_APPRO',nom:'Approvisionneur',domaineId:D(1),criticite:'Majeur',nbUtilisateurs:18,sod:false,responsableId:A(8),statut:'na',description:''},
-    {code:'SCM_MAGASIN',nom:'Magasinier',domaineId:D(2),criticite:'Majeur',nbUtilisateurs:60,sod:false,responsableId:A(6),statut:'na',description:'Mouvements de stock.'},
-    {code:'REF_ADMIN',nom:'Administrateur des référentiels',domaineId:D(5),criticite:'Critique',nbUtilisateurs:4,sod:true,responsableId:A(11),statut:'cours',description:'Création des données de référence.'},
-    {code:'SEC_ADMIN',nom:'Administrateur de sécurité',domaineId:null,criticite:'Critique',nbUtilisateurs:2,sod:true,responsableId:A(3),statut:'na',description:'Gestion des habilitations.'}]);
+    {code:'ACH_ACHETEUR',nom:'Acheteur',domaineId:D(1),criticite:'Majeur',nbUtilisateurs:22,sod:true,responsableId:A(8),statut:'cours',description:'Commandes dans la limite de délégation.'}]);
   const boutEnBout=stamp([
-    {ref:'E2E-01',nom:'De la demande d\'achat au paiement fournisseur',domainesCouverts:'Achats · Finance',debut:'2027-06-07',fin:'2027-06-25',responsableId:A(2),statut:'na',prerequis:'Interfaces bancaires livrées.'},
-    {ref:'E2E-02',nom:'De la commande client à l\'encaissement',domainesCouverts:'Ventes · Finance',debut:'2027-06-14',fin:'2027-07-02',responsableId:A(2),statut:'na',prerequis:''},
-    {ref:'E2E-03',nom:'De la réception à la mise en stock',domainesCouverts:'Achats · Supply Chain',debut:'2027-06-21',fin:'2027-07-09',responsableId:A(8),statut:'na',prerequis:'Interface WMS active.'},
-    {ref:'E2E-04',nom:'Clôture comptable mensuelle complète',domainesCouverts:'Finance',debut:'2027-07-05',fin:'2027-07-23',responsableId:A(7),statut:'na',prerequis:''},
-    {ref:'E2E-05',nom:'Inventaire et valorisation des stocks',domainesCouverts:'Supply Chain · Finance',debut:'2027-07-12',fin:'2027-07-30',responsableId:A(6),statut:'na',prerequis:''}]);
+    {ref:'E2E-01',nom:'De la demande d\'achat au paiement fournisseur',domainesCouverts:'Achats · Finance',debut:'2027-06-07',fin:'2027-06-25',responsableId:A(2),statut:'na',prerequis:'Interfaces bancaires livrées.'}]);
   const planBascule=stamp([
     {ordre:1,etape:'Gel des saisies sur l\'ancien ERP',jour:'J-1',debut:'2027-12-22',duree:'1 h',responsableId:A(0),precondition:'Communication diffusée',statut:'na'},
-    {ordre:2,etape:'Extraction finale des données sources',jour:'J-1',debut:'2027-12-22',duree:'4 h',responsableId:A(11),precondition:'Gel effectif',statut:'na'},
-    {ordre:3,etape:'Chargement dans le nouvel ERP',jour:'Jour J',debut:'2027-12-24',duree:'6 h',responsableId:A(11),precondition:'Extraction validée',statut:'na'},
-    {ordre:4,etape:'Contrôles de réconciliation',jour:'Jour J',debut:'2027-12-24',duree:'4 h',responsableId:A(7),precondition:'Chargement terminé',statut:'na'},
-    {ordre:5,etape:'Bascule des interfaces',jour:'Jour J',debut:'2027-12-24',duree:'3 h',responsableId:A(9),precondition:'Contrôles OK',statut:'na'},
-    {ordre:6,etape:'Go / No-Go final',jour:'Jour J',debut:'2027-12-24',duree:'1 h',responsableId:A(0),precondition:'Contrôles OK',statut:'na'},
-    {ordre:7,etape:'Ouverture aux utilisateurs',jour:'J+1',debut:'2028-01-03',duree:'2 h',responsableId:A(1),precondition:'Go prononcé',statut:'na'}]);
+    {ordre:2,etape:'Chargement dans le nouvel ERP',jour:'Jour J',debut:'2027-12-24',duree:'6 h',responsableId:A(11),precondition:'Extraction validée',statut:'na'},
+    {ordre:3,etape:'Go / No-Go final',jour:'Jour J',debut:'2027-12-24',duree:'1 h',responsableId:A(0),precondition:'Contrôles OK',statut:'na'}]);
   const _donnees=seedDonnees(A);
   const dId=nom=>{ const o=_donnees.find(d=>d.nom===nom); return o?o.id:null; };
   const bascule=stamp([
     {typeDonnee:'Articles',donneeId:dId('Articles'),action:'Extraction et contrôle qualité',debut:'2027-11-01',fin:'2027-11-14',responsableId:A(11),statut:'na',commentaire:''},
-    {typeDonnee:'Articles',donneeId:dId('Articles'),action:'Chargement et réconciliation',debut:'2027-12-24',fin:'2027-12-24',responsableId:A(11),statut:'na',commentaire:''},
-    {typeDonnee:'Clients',donneeId:dId('Clients'),action:'Nettoyage des doublons',debut:'2027-11-03',fin:'2027-11-18',responsableId:A(11),statut:'na',commentaire:''},
-    {typeDonnee:'Clients',donneeId:dId('Clients'),action:'Chargement final',debut:'2027-12-24',fin:'2027-12-24',responsableId:A(11),statut:'na',commentaire:''},
     {typeDonnee:'Fournisseurs',donneeId:dId('Fournisseurs'),action:'Fusion et validation',debut:'2027-11-05',fin:'2027-11-20',responsableId:A(11),statut:'na',commentaire:''},
-    {typeDonnee:'Fournisseurs',donneeId:dId('Fournisseurs'),action:'Chargement final',debut:'2027-12-24',fin:'2027-12-24',responsableId:A(11),statut:'na',commentaire:''},
     {typeDonnee:'Commandes d\'achat',donneeId:dId('Commandes d\'achat'),action:'Reprise des en-cours',debut:'2027-12-13',fin:'2027-12-22',responsableId:A(8),statut:'na',commentaire:'Uniquement les commandes ouvertes.'},
     {typeDonnee:'Soldes et écritures comptables',donneeId:dId('Soldes et écritures comptables'),action:'Reprise des balances',debut:'2027-12-27',fin:'2027-12-30',responsableId:A(7),statut:'na',commentaire:''}]);
   const repetitions=stamp([
-    {serie:'Répétition 1',action:'Reprise à blanc complète',typeDonnee:'Tous',debut:'2027-10-04',fin:'2027-10-15',responsableId:A(11),resultat:'Non démarré',statut:'na',constats:''},
-    {serie:'Répétition 1',action:'Test du plan de bascule chronométré',typeDonnee:'—',debut:'2027-10-11',fin:'2027-10-15',responsableId:A(2),resultat:'Non démarré',statut:'na',constats:''},
-    {serie:'Répétition 2',action:'Reprise à blanc complète',typeDonnee:'Tous',debut:'2027-11-15',fin:'2027-11-26',responsableId:A(11),resultat:'Non démarré',statut:'na',constats:''},
-    {serie:'Répétition 2',action:'Répétition générale avec les key users',typeDonnee:'—',debut:'2027-11-22',fin:'2027-11-26',responsableId:A(1),resultat:'Non démarré',statut:'na',constats:''}]);
+    {serie:'Répétition 1',action:'Reprise à blanc complète',typeDonnee:'Tous',debut:'2027-10-04',fin:'2027-10-15',responsableId:A(11),resultat:'Non démarré',statut:'na',constats:''}]);
   return {commGroupes,evenements,regles,budget,realisation,demandes,documents,attendus,roles,boutEnBout,planBascule,bascule,repetitions,
     photos:[], budgetVersions:[], charte:{texte:CHARTE_DEFAUT,maj:nowStamp()}, testStrategie:{texte:STRAT_DEFAUT,maj:nowStamp()},
     campagnes:seedCampagnes(A,_donnees), donnees:_donnees};
@@ -3671,6 +3720,7 @@ function ressWeeks(keys){
   while(true){ const mk=monthKey(d); if(mk>lastMk) break; if(keys.includes(mk)) out.push({monday:new Date(d), mk}); d=new Date(d.getTime()+7*DAY); if(out.length>600) break; }
   return out;
 }
+/* === BUDGET (cf. Lot 3 — tableau de bord sponsor & synthèse) === */
 function renderCoutRessources(mount){
   state.chargePrevue = state.chargePrevue||{}; state.tarifMensuel = state.tarifMensuel||{};
   const dev=state.params.devise, h=horizon(), keys=monthsRange(h.debut,h.fin);
@@ -3987,41 +4037,23 @@ function seedDonnees(A){
     obj({nom:'Articles',ordre:1,histSysteme:'ERP historique',histTable:'ART_MASTER',cibleTable:'MARA / MVKE',proprietaire:'Cellule référentiel',responsableId:A(11),
       champs:[
         c('Code article','ERP historique','Séquence','Conserver la codification existante en clé de correspondance.'),
-        c('Désignation','ERP historique','Texte libre','Nettoyage des libellés à prévoir.'),
-        c('Famille d\'achat','Portail fournisseurs','Référentiel familles','Reprise depuis le portail achats.'),
-        c('Unité de mesure','ERP historique','UM normalisées','Mapping vers unités cibles (DEM-005).'),
-        c('Statut article','ERP historique','Actif / Bloqué / Obsolète',''),
-        c('Gestionnaire de stock','WMS entrepôt','Utilisateurs WMS','')]}),
-    obj({nom:'Commandes de vente',ordre:2,histSysteme:'ERP historique',histTable:'SO_HEADER / SO_LINE',cibleTable:'VBAK / VBAP',proprietaire:'Administration des ventes',responsableId:A(1),
-      champs:[c('Numéro de commande','ERP historique','Séquence','Uniquement les en-cours repris.'),
-        c('Client','CRM commercial','Référentiel clients',''),
-        c('Article','ERP historique','Référentiel articles','')]}),
-    obj({nom:'Clients',ordre:3,histSysteme:'CRM commercial',histTable:'CUSTOMER',cibleTable:'KNA1',proprietaire:'Administration des ventes',responsableId:A(11),
+        c('Désignation','ERP historique','Texte libre','Nettoyage des libellés à prévoir.')]}),
+    obj({nom:'Clients',ordre:2,histSysteme:'CRM commercial',histTable:'CUSTOMER',cibleTable:'KNA1',proprietaire:'Administration des ventes',responsableId:A(11),
       champs:[c('Code client','CRM commercial','Séquence',''),
-        c('Raison sociale','CRM commercial','Texte libre','Dédoublonnage à réaliser.'),
-        c('Conditions de paiement','ERP historique','Référentiel conditions','')]}),
-    obj({nom:'Fournisseurs',ordre:4,histSysteme:'ERP historique',histTable:'VENDOR',cibleTable:'LFA1',proprietaire:'Achats',responsableId:A(11),
+        c('Raison sociale','CRM commercial','Texte libre','Dédoublonnage à réaliser.')]}),
+    obj({nom:'Fournisseurs',ordre:3,histSysteme:'ERP historique',histTable:'VENDOR',cibleTable:'LFA1',proprietaire:'Achats',responsableId:A(11),
       champs:[c('Code fournisseur','ERP historique','Séquence',''),
-        c('Raison sociale','ERP historique','Texte libre','2 400 doublons identifiés.'),
         c('IBAN','Gestion de trésorerie','Comptes bancaires','Donnée sensible — contrôle renforcé.')]}),
-    obj({nom:'Commandes d\'achat',ordre:5,histSysteme:'ERP historique',histTable:'PO_HEADER / PO_LINE',cibleTable:'EKKO / EKPO',proprietaire:'Achats',responsableId:A(8),
+    obj({nom:'Commandes d\'achat',ordre:4,histSysteme:'ERP historique',histTable:'PO_HEADER / PO_LINE',cibleTable:'EKKO / EKPO',proprietaire:'Achats',responsableId:A(8),
       champs:[c('Numéro de commande','ERP historique','Séquence','En-cours ouverts uniquement.'),
-        c('Fournisseur','ERP historique','Référentiel fournisseurs',''),
-        c('Article','ERP historique','Référentiel articles','')]}),
-    obj({nom:'Pays',ordre:6,histSysteme:'ERP historique',histTable:'COUNTRY',cibleTable:'T005',proprietaire:'Cellule référentiel',responsableId:A(11),
-      champs:[c('Code pays','—','ISO 3166','Aligner sur la norme ISO.'),
-        c('Zone fiscale','ERP historique','Référentiel fiscal','')]}),
-    obj({nom:'Données système',ordre:7,histSysteme:'ERP historique',histTable:'CONFIG',cibleTable:'Tables de personnalisation',proprietaire:'Équipe technique',responsableId:A(3),
-      champs:[c('Sociétés','ERP historique','Référentiel sociétés',''),
-        c('Devises','ERP historique','ISO 4217',''),
-        c('Exercices comptables','ERP historique','Calendrier fiscal','')]}),
-    obj({nom:'Soldes et écritures comptables',ordre:8,histSysteme:'ERP historique',histTable:'GL_BALANCE / GL_ENTRY',cibleTable:'BSEG / BKPF',proprietaire:'Comptabilité',responsableId:A(7),
+        c('Fournisseur','ERP historique','Référentiel fournisseurs','')]}),
+    obj({nom:'Soldes et écritures comptables',ordre:5,histSysteme:'ERP historique',histTable:'GL_BALANCE / GL_ENTRY',cibleTable:'BSEG / BKPF',proprietaire:'Comptabilité',responsableId:A(7),
       champs:[c('Compte général','ERP historique','Plan comptable','Repris comme soldes d\'ouverture.'),
-        c('Centre analytique','ERP historique','Référentiel analytique',''),
         c('Montant reporté','ERP historique','—','Contrôle de réconciliation obligatoire.')]})
   ];
 }
 let selDonnee=null;
+/* === MODÈLE DE DONNÉES & REPRISE === */
 function renderDonnees(){
   if(!state.donnees.length){ $('#view-donnees').innerHTML='<div class="card"><div class="card__body muted">Aucun objet de données.</div></div>'; return; }
   if(!selDonnee || !state.donnees.some(d=>d.id===selDonnee)) selDonnee=state.donnees[0].id;
@@ -4311,25 +4343,76 @@ async function renderUsersCard(){
   let profs=[];
   try{ profs=await DB.listProfiles(); }
   catch(e){ mount.innerHTML='<div class="card"><div class="card__body muted">Comptes utilisateurs : lecture impossible.</div></div>'; return; }
-  const acteurDe=mail=>{ const m=(mail||'').toLowerCase();
-    const a=state.acteurs.find(x=>(x.authEmail||'').toLowerCase()===m)||state.acteurs.find(x=>(x.email||'').toLowerCase()===m);
-    return a? (a.prenom+' '+a.nom) : '—'; };
+  const orphelins = profs.filter(pr=>!pr.acteur_id).length;
   mount.innerHTML=`<div class="card"><div class="card__head"><h2>Utilisateurs et rôles</h2>
-      <span class="section__count">${profs.length} comptes</span></div>
-    <table class="tbl"><thead><tr><th>Compte</th><th>Acteur projet associé</th><th style="width:160px">Rôle</th></tr></thead>
-    <tbody>${profs.map(pr=>`<tr>
+      <span class="section__count">${profs.length} comptes</span>${orphelins?`<span class="tag tag--late" title="Un compte sans acteur rattaché ne devrait pas exister">${orphelins} orphelin(s)</span>`:''}${admin?'<button class="btn btn--sm" id="uc_new" style="margin-left:auto">Créer un accès</button>':''}</div>
+    <table class="tbl"><thead><tr><th>Compte</th><th>Acteur projet rattaché</th><th style="width:160px">Rôle</th>${admin?'<th style="width:100px"></th>':''}</tr></thead>
+    <tbody>${profs.map(pr=>{ const orphelin=!pr.acteur_id;
+      return `<tr>
       <td class="mono" style="font-size:12px">${esc(pr.email||pr.user_id)}</td>
-      <td>${esc(acteurDe(pr.email))}</td>
+      <td>${admin?`<select data-acteur-uid="${pr.user_id}" style="width:200px">
+          <option value="">— Aucun (compte orphelin) —</option>
+          ${state.acteurs.filter(a=>a.actif).slice().sort((x,y)=>(x.prenom+x.nom).localeCompare(y.prenom+y.nom)).map(a=>`<option value="${a.id}" ${pr.acteur_id===a.id?'selected':''}>${esc(a.prenom+' '+a.nom)}</option>`).join('')}</select>`
+        : (pr.acteur_id? esc(acteurNom(pr.acteur_id)) : '<span class="muted">—</span>')}
+        ${orphelin?' <span class="tag tag--late">Orphelin</span>':''}</td>
       <td>${admin?`<select data-role-uid="${pr.user_id}" style="width:140px">
           ${['lecteur','editeur','admin'].map(r=>`<option ${pr.role===r?'selected':''}>${r}</option>`).join('')}</select>`
-        :`<span class="tag">${esc(pr.role)}</span>`}</td></tr>`).join('')}</tbody></table>
-    <div class="card__body"><p class="hint" style="margin:0">Les comptes se créent dans la console Supabase (Authentication → Invite user). L'association à un acteur se fait par l'adresse e-mail de sa fiche. ${admin?'Le changement de rôle est immédiat.':''}</p></div></div>`;
-  if(admin) mount.querySelectorAll('[data-role-uid]').forEach(sel=>{
-    sel.onchange=async ()=>{
-      try{ await DB.setRole(sel.dataset.roleUid, sel.value); toast('Rôle mis à jour'); }
-      catch(e){ toast('Échec de la mise à jour du rôle.'); renderUsersCard(); }
-    };
-  });
+        :`<span class="tag">${esc(pr.role)}</span>`}</td>
+      ${admin?`<td><button class="btn btn--sm btn--ghost btn--danger" data-revoke="${pr.user_id}" title="Retirer les droits applicatifs de ce compte">Révoquer</button></td>`:''}</tr>`;}).join('')}</tbody></table>
+    <div class="card__body"><p class="hint" style="margin:0">« Créer un accès » ouvre un compte de connexion (e-mail + mot de passe provisoire) et exige de le rattacher immédiatement à un acteur projet. « Révoquer » retire immédiatement tous les droits applicatifs (le compte de connexion subsiste ; pour le supprimer totalement, utilisez la console Supabase → Authentication → Users). Le rattachement compte↔acteur se fait ici, explicitement — il ne repose plus sur une correspondance d'adresse e-mail. Un compte orphelin (sans acteur) n'a accès à aucune vue par population et ne devrait pas rester en l'état.</p></div></div>`;
+  if(admin){
+    mount.querySelectorAll('[data-role-uid]').forEach(sel=>{
+      sel.onchange=async ()=>{
+        try{ await DB.setRole(sel.dataset.roleUid, sel.value); toast('Rôle mis à jour'); }
+        catch(e){ toast('Échec de la mise à jour du rôle.'); renderUsersCard(); }
+      };
+    });
+    mount.querySelectorAll('[data-acteur-uid]').forEach(sel=>{
+      sel.onchange=async ()=>{
+        try{ await DB.setActeur(sel.dataset.acteurUid, sel.value||null); toast('Acteur rattaché mis à jour'); renderUsersCard(); }
+        catch(e){ toast('Échec du rattachement.'); renderUsersCard(); }
+      };
+    });
+    mount.querySelectorAll('[data-revoke]').forEach(btn=>{
+      btn.onclick=async ()=>{
+        if(!confirm('Révoquer tous les droits applicatifs de ce compte ? Il ne pourra plus ni lire ni écrire tant qu\'un rôle ne lui sera pas redonné.')) return;
+        try{ await DB.revokeAccess(btn.dataset.revoke); toast('Accès révoqué'); renderUsersCard(); }
+        catch(e){ toast('Échec de la révocation.'); }
+      };
+    });
+    const nb=$('#uc_new'); if(nb) nb.onclick=()=>dialogCreerAcces();
+  }
+}
+function dialogCreerAcces(){
+  const acteursDispo = state.acteurs.filter(a=>a.actif).slice().sort((x,y)=>(x.prenom+x.nom).localeCompare(y.prenom+y.nom));
+  modal({titre:'Créer un accès', ok:'Fermer', noSave:true, onOk(){ return true; },
+    corps:`<p class="hint">Crée un nouveau compte de connexion. Votre session actuelle n'est pas affectée. Tout compte doit être rattaché à un acteur du projet — un compte orphelin n'a accès à aucune vue par population.</p>
+      <label class="f"><span>E-mail</span><input type="email" id="uc_mail" placeholder="prenom.nom@exemple.com"></label>
+      <label class="f"><span>Mot de passe provisoire</span><input type="text" id="uc_pwd" placeholder="8 caractères minimum"></label>
+      <label class="f"><span>Rôle initial</span><select id="uc_role"><option value="lecteur">lecteur</option><option value="editeur">editeur</option><option value="admin">admin</option></select></label>
+      <label class="f"><span>Acteur à rattacher (obligatoire)</span><select id="uc_act">
+        <option value="">— Choisir un acteur —</option>
+        ${acteursDispo.map(a=>`<option value="${a.id}">${esc(a.prenom+' '+a.nom)} — ${populationLabel(a.population)}</option>`).join('')}</select></label>
+      ${acteursDispo.length? '' : '<p class="hint" style="color:#C6382F">Aucun acteur actif à rattacher : créez d\'abord la fiche acteur dans Équipe projet.</p>'}
+      <div id="uc_res" class="hint" style="margin:6px 0 0"></div>
+      <div class="cf-actions"><button class="btn btn--primary" id="uc_go">Créer le compte</button></div>`});
+  const go=$('#uc_go'); if(go) go.onclick=async ()=>{
+    const email=($('#uc_mail').value||'').trim(), pwd=$('#uc_pwd').value||'', acteurId=$('#uc_act').value||'';
+    const resEl=$('#uc_res');
+    if(!email || pwd.length<8){ resEl.innerHTML='<span style="color:#C6382F">Adresse e-mail et mot de passe (8 caractères min.) requis.</span>'; return; }
+    if(!acteurId){ resEl.innerHTML='<span style="color:#C6382F">Choisissez l\'acteur à rattacher : un compte ne peut pas rester orphelin.</span>'; return; }
+    go.disabled=true; go.textContent='Création…';
+    try{
+      const u = await DB.createUserAsAdmin(email, pwd);
+      if(u && u.id){
+        try{ await DB.setRole(u.id, $('#uc_role').value); }catch(e){}
+        try{ await DB.setActeur(u.id, acteurId); }catch(e){}
+      }
+      resEl.innerHTML = '<span style="color:#0F8A5F">Compte créé et rattaché'+(u&&u.needsConfirm?' — confirmation d\'e-mail requise avant connexion.':'.')+'</span>';
+      renderUsersCard();
+    }catch(e){ resEl.innerHTML='<span style="color:#C6382F">Échec : '+esc((e&&e.message)||'erreur')+'</span>'; }
+    go.disabled=false; go.textContent='Créer le compte';
+  };
 }
 async function submitFeedback(obj){
   if(PERSIST.mode==='cloud'){
@@ -4373,6 +4456,28 @@ function renderFeedback(){
     catch(e){ console.error(e); go.disabled=false; go.textContent='Envoyer'; $('#fb_res').innerHTML='<span style="color:#C6382F">Envoi impossible ('+esc((e&&e.code)||'erreur')+'). Réessayez.</span>'; }
   };
 }
+function renderSuccess(){
+  const closes = state.actions.filter(a=>a.statut==='fait');
+  const total = state.actions.length;
+  const pct = total? Math.round(closes.length/total*100) : 0;
+  const parDom={}; closes.forEach(a=>{ const d=domaineDeAction(a); const k=d?domaineById(d)?.nom:'Sans domaine'; parDom[k||'Sans domaine']=(parDom[k||'Sans domaine']||0)+1; });
+  const parSec={}; closes.forEach(a=>{ const s=state.sections.find(x=>x.id===a.sectionId); const k=s?s.nom:'—'; parSec[k]=(parSec[k]||0)+1; });
+  const kpis=[
+    ['Actions clôturées', String(closes.length), `sur ${total} action(s) au total`],
+    ['Taux de clôture', pct+' %', ''],
+    ['Ouvertes / en retard', String(state.actions.filter(a=>a.statut!=='fait'&&a.echeance&&a.echeance<today()).length), 'en retard'],
+  ];
+  $('#view-success').innerHTML=`
+    <div class="kpis">${kpis.map(k=>`<div class="kpi"><div class="kpi__k">${k[0]}</div><div class="kpi__v">${esc(k[1])}</div><div class="kpi__n">${esc(k[2])}</div></div>`).join('')}</div>
+    <div class="card"><div class="card__head"><h2>Clôtures par domaine</h2></div>
+      ${Object.keys(parDom).length? `<table class="tbl"><thead><tr><th>Domaine</th><th class="num">Actions clôturées</th></tr></thead>
+      <tbody>${Object.entries(parDom).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<tr><td>${esc(k)}</td><td class="num">${v}</td></tr>`).join('')}</tbody></table>`
+      : '<div class="card__body muted">Aucune action clôturée pour le moment.</div>'}</div>
+    <div class="card"><div class="card__head"><h2>Clôtures par section du plan d\\'action</h2></div>
+      ${Object.keys(parSec).length? `<table class="tbl"><thead><tr><th>Section</th><th class="num">Actions clôturées</th></tr></thead>
+      <tbody>${Object.entries(parSec).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<tr><td>${esc(k)}</td><td class="num">${v}</td></tr>`).join('')}</tbody></table>`
+      : '<div class="card__body muted">Aucune action clôturée pour le moment.</div>'}</div>`;
+}
 function showFatal(e){
   const msg = e && (e.message||e.code) ? (e.message||e.code) : String(e);
   let root=document.getElementById('authRoot'); if(!root){ root=document.createElement('div'); root.id='authRoot'; document.body.appendChild(root); }
@@ -4384,11 +4489,10 @@ function showFatal(e){
 }
 function monActeurId(){
   if(PERSIST.mode!=='cloud') return null;
-  const u=DB.currentUser(); if(!u||!u.email) return null;
-  const mail=u.email.toLowerCase();
-  const a=state.acteurs.find(x=>(x.authEmail||'').toLowerCase()===mail) ||
-          state.acteurs.find(x=>(x.email||'').toLowerCase()===mail);
-  return a? a.id : null;
+  // Lot 1a — socle accès : le rattachement est désormais explicite (profil.acteurId),
+  // porté par la table profiles et assigné depuis Utilisateurs et rôles.
+  // Remplace l'ancienne inférence par correspondance d'e-mail.
+  return (DB.myActeurId && DB.myActeurId()) || null;
 }
 async function startApp(){
   try{
@@ -4396,6 +4500,8 @@ async function startApp(){
     const me=monActeurId(); if(me && typeof tdbScope!=='undefined') tdbScope.acteurId=me;
     ensureViews(); buildNav(); initIO(); go('dashboard'); applyRoleUI();
     if(PERSIST.mode==='cloud' && DB.subscribe) DB.subscribe(applyRealtime);
+    if(PERSIST.mode==='cloud') chargerProfilsCache();
+    if(PERSIST.mode==='cloud' && !me) toast('Votre compte n\'est rattaché à aucun acteur du projet — demandez à un administrateur de le faire dans Utilisateurs et rôles.');
     majSave();
   }catch(e){ console.error('Amorçage interrompu :', e); showFatal(e); }
 }
