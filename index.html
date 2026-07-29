@@ -784,7 +784,15 @@ tr.lvl td{background:rgba(20,30,60,.02)}
     const mod = await import(LIB);
     const tmp = mod.createClient(CFG.url, CFG.key, { auth: { persistSession:false, autoRefreshToken:false } });
     const { data, error } = await tmp.auth.signUp({ email, password });
-    if (error) throw mapError(error);
+    if (error) {
+      if (/signups not allowed/i.test(error.message || '')) {
+        throw err('signup_disabled',
+          "Les inscriptions sont désactivées sur ce projet Supabase (réglage recommandé pour un outil interne). " +
+          "Activez temporairement « Allow new users to sign up » dans Authentication → Providers → Email, " +
+          "créez le compte, puis redésactivez ce réglage.");
+      }
+      throw mapError(error);
+    }
     return data && data.user ? { id:data.user.id, email:data.user.email, needsConfirm: !data.session } : null;
   }
   // Révoque l'accès applicatif d'un compte (supprime son profil de rôle).
@@ -874,6 +882,62 @@ function populationTag(v){ const p=POPULATIONS.find(x=>x.v===v); return p? `<spa
    ============================================================ */
 let state = null;
 const STORE_KEY = 'pilotage-erp-v1';
+
+// Génère le référentiel de processus hiérarchiques du jeu de démonstration.
+// Volumétrie voulue : 15 bout-en-bout, N1=56, N2=138, N3=10 (total 219).
+// Chaque nœud porte : parentId, niveau (b2b|n1|n2|n3), domaineId, transverse,
+// code, nom, referentId (acteur), criticite (Haute|Moyenne|Basse), outilActuelId (système).
+function seedProcessus(A, systemes, domaines){
+  // Résolution des domaines : le seed référence dm1..dm6 (ordre 1..6).
+  // On mappe vers les domaines réellement présents, par ordre, avec repli
+  // sur le premier domaine existant — pour rester robuste en cloud où les
+  // id de domaines peuvent différer de 'dm1'..'dm6'.
+  const doms = (domaines || (typeof state!=='undefined' && state.domaines) || []).slice().sort((a,b)=>(a.ordre||0)-(b.ordre||0));
+  const domRef = ref => {
+    const n = parseInt(String(ref).replace('dm',''),10);   // 'dm2' -> 2
+    const d = doms[n-1] || doms[0];
+    return d ? d.id : ref;
+  };
+  const B2B = [
+    ['Purchase to Pay','dm2',false],['Order to Cash','dm4',false],['Plan to Produce','dm5',false],
+    ['Hire to Retire','dm1',false],['Record to Report','dm1',false],['Forecast to Stock','dm3',false],
+    ['Procure to Receive','dm2',false],['Quote to Order','dm4',false],['Design to Manufacture','dm5',false],
+    ['Warehouse to Ship','dm3',false],['Return to Refund','dm4',false],['Acquire to Retire (immobilisations)','dm1',false],
+    ['Demand to Supply','dm3',false],['Issue to Resolution (SAV)','dm4',false],['Master Data Management','dm6',true]
+  ];
+  const N1_NOMS=['Cadrage et référentiels','Exécution opérationnelle','Contrôle et validation','Clôture et reporting',
+    'Gestion des exceptions','Pilotage et indicateurs','Interfaces et flux','Conformité et audit','Paramétrage',
+    'Reprise de données','Habilitations','Documentation','Support','Amélioration continue','Archivage'];
+  const N2_VERBE=['Créer','Modifier','Valider','Contrôler','Éditer','Rapprocher','Analyser','Clôturer','Générer',
+    'Suivre','Corriger','Intégrer','Extraire','Consolider','Notifier'];
+  const N3_NOMS=['Saisie initiale','Vérification automatique','Approbation','Notification','Archivage'];
+  const CRITS=['Haute','Moyenne','Basse']; const crit=i=>CRITS[i%3];
+  const outilId = i => (systemes[i % systemes.length]||{}).id || null;
+  let ai=0; const nextAct=()=>A(ai++%12);
+  const counters={}; const code=(dom,pre)=>{ counters[dom]=counters[dom]||{}; counters[dom][pre]=(counters[dom][pre]||0)+1; return pre+'-'+String(counters[dom][pre]).padStart(3,'0'); };
+  let idc=0; const nid=()=>'pr_'+(idc++).toString(36);
+  const ns=nowStamp(); const cd=today();
+  const out=[]; const push=o=>{ out.push(Object.assign({creeLe:cd,maj:ns},o)); };
+  B2B.forEach((b,bi)=>{
+    const bId=nid(), domKey=b[1], dom=domRef(domKey);
+    push({id:bId,parentId:null,niveau:'b2b',domaineId:dom,transverse:b[2],code:code(domKey,'B2B'),nom:b[0],referentId:nextAct(),criticite:crit(bi),outilActuelId:outilId(bi)});
+    const nbN1=(bi<2)?15:2;
+    for(let i=0;i<nbN1;i++){
+      const n1Id=nid();
+      push({id:n1Id,parentId:bId,niveau:'n1',domaineId:dom,transverse:false,code:code(domKey,'N1'),nom:N1_NOMS[i%N1_NOMS.length],referentId:nextAct(),criticite:crit(i),outilActuelId:outilId(i)});
+      const nbN2=(bi===0&&i<2)?15:2;
+      for(let j=0;j<nbN2;j++){
+        const n2Id=nid();
+        push({id:n2Id,parentId:n1Id,niveau:'n2',domaineId:dom,transverse:false,code:code(domKey,'N2'),nom:N2_VERBE[j%N2_VERBE.length]+' — '+N1_NOMS[i%N1_NOMS.length].toLowerCase(),referentId:nextAct(),criticite:crit(j),outilActuelId:outilId(j)});
+        const nbN3=(bi===0&&i===0&&j<2)?5:0;
+        for(let k=0;k<nbN3;k++){
+          push({id:nid(),parentId:n2Id,niveau:'n3',domaineId:dom,transverse:false,code:code(domKey,'N3'),nom:N3_NOMS[k%N3_NOMS.length],referentId:nextAct(),criticite:crit(k),outilActuelId:outilId(k)});
+        }
+      }
+    }
+  });
+  return out;
+}
 
 function seed(){
   const ph = [
@@ -975,24 +1039,9 @@ function seed(){
     ['Production','#0E86AD',6],
     ['Données de référence','#6B7785',11]
   ];
-  const domaines = domCfg.map((d,i)=>({id:'dm'+(i+1),nom:d[0],couleur:d[1],ordre:i+1,responsableId:A(d[2]),commentaire:''}));
+  const domaines = domCfg.map((d,i)=>({id:'dm'+(i+1),nom:d[0],couleur:d[1],ordre:i+1,responsableId:A(d[2]),commentaire:'',lot:(i<2?'lot1':i<4?'lot2':'lot3'),proprietaireProcessusId:A(d[2])}));
 
-  const procCfg = [
-    ['dm1','FIN','Comptabilité générale','copil','Standard','Critique',4,'Atelier FIN-1'],
-    ['dm1','FIN','Clôture et reporting financier','metier','Paramétrage','Critique',7,'Atelier FIN-3'],
-    ['dm2','ACH','Commande d\'achat','metier','Standard','Critique',5,'Atelier ACH-2'],
-    ['dm2','ACH','Facturation fournisseur et rapprochement','atelier','Paramétrage','Critique',7,''],
-    ['dm3','SCM','Gestion des stocks et emplacements','arbitrage','Interface','Critique',6,'Atelier SCM-2'],
-    ['dm4','ADV','Commande client','atelier','Standard','Critique',1,''],
-    ['dm5','PRD','Nomenclatures et gammes','non','À qualifier','Majeur',3,''],
-    ['dm6','REF','Référentiel articles','metier','Paramétrage','Critique',11,'Atelier REF-1']
-  ];
-  const cpt={};
-  const processus = procCfg.map(p=>{
-    cpt[p[1]]=(cpt[p[1]]||0)+1;
-    return {id:uid('pr'),domaineId:p[0],code:p[1]+'-'+String(cpt[p[1]]).padStart(2,'0'),nom:p[2],statut:p[3],
-      couverture:p[4],criticite:p[5],responsableId:A(p[6]),atelier:p[7],commentaire:''};
-  });
+  const processus = seedProcessus(A, systemes, domaines);
 
   const transformations = [
     ['dm2','Saisie des réceptions directement en entrepôt','Les réceptions saisies aujourd\'hui par le service achats passent aux équipes entrepôt, sur terminal mobile.','Processus','Fort','Magasiniers et approvisionneurs',45,'Accompagnement terrain','cours',6,'2027-09-30'],
@@ -1038,7 +1087,7 @@ function normalizeStamps(){
   const baseISO = new Date(base+'T09:00:00').toISOString();
   ['taches','actions','acteurs','systemes','domaines','processus','transformations','formations',
    'commGroupes','evenements','regles','budget','realisation','demandes','documents','attendus',
-   'roles','boutEnBout','planBascule','bascule','repetitions','photos','donnees','campagnes','budgetVersions'].forEach(k=>{
+   'roles','boutEnBout','planBascule','bascule','repetitions','photos','donnees','campagnes','budgetVersions','risques','decisions'].forEach(k=>{
     (state[k]||[]).forEach(o=>{ if(!o.creeLe) o.creeLe=base; if(!o.maj) o.maj=baseISO;
       if(k==='donnees'){ (o.champs||[]).forEach(c=>{ if(!c.maj) c.maj=baseISO; }); }
       if(k==='campagnes'){ (o.tests||[]).forEach(t=>{ if(!t.maj) t.maj=baseISO; }); } });
@@ -1048,11 +1097,12 @@ function migrer(){
   const s = seed();
   ['systemes','domaines','processus','transformations','formations','sections','absences',
    'commGroupes','evenements','regles','budget','realisation','demandes','documents','attendus',
-   'roles','boutEnBout','planBascule','bascule','repetitions','photos','donnees','campagnes','budgetVersions'].forEach(k=>{
+   'roles','boutEnBout','planBascule','bascule','repetitions','photos','donnees','campagnes','budgetVersions','risques','decisions'].forEach(k=>{
     if(!Array.isArray(state[k])) state[k]=s[k];
   });
   if(!state.charte) state.charte=s.charte;
   if(!state.testStrategie) state.testStrategie=s.testStrategie;
+  if(!state.statutProjet) state.statutProjet=s.statutProjet;
   (state.bascule||[]).forEach(b=>{ if(!b.donneeId && b.typeDonnee){ const o=(state.donnees||[]).find(d=>d.nom===b.typeDonnee); if(o) b.donneeId=o.id; } });
   if(!state.dispos) state.dispos={};
   if(!state.params) state.params=s.params;
@@ -1206,8 +1256,8 @@ async function deleteEntities(coll, ids, extra, okMsg){
    ============================================================ */
 const CLOUD_COLLS = ['phases','taches','acteurs','absences','sections','actions','systemes','domaines',
   'processus','transformations','formations','commGroupes','evenements','regles','budget','realisation',
-  'demandes','documents','attendus','roles','boutEnBout','planBascule','bascule','repetitions','donnees','campagnes','photos','budgetVersions','feedback'];
-const CLOUD_SINGLES = ['projet','params','charte','testStrategie','dispos','chargePrevue','tarifMensuel'];
+  'demandes','documents','attendus','roles','boutEnBout','planBascule','bascule','repetitions','donnees','campagnes','photos','budgetVersions','feedback','risques','decisions'];
+const CLOUD_SINGLES = ['projet','params','charte','testStrategie','dispos','chargePrevue','tarifMensuel','statutProjet'];
 function cloudEnabled(){ const c=window.SUPABASE_CONFIG||{}; return !!(c.url && c.key && c.key!=='REMPLACER_PAR_LA_CLE_PUBLISHABLE'); }
 function persistSingleton(key){
   if(state[key]===undefined) return;
@@ -1372,10 +1422,17 @@ const ICONS = {
   donnees:'<svg viewBox="0 0 20 20"><ellipse cx="10" cy="5" rx="6" ry="2.4"/><path d="M4 5v10c0 1.3 2.7 2.4 6 2.4s6-1.1 6-2.4V5M4 10c0 1.3 2.7 2.4 6 2.4s6-1.1 6-2.4"/></svg>',
   bascule:'<svg viewBox="0 0 20 20"><path d="M3 7h9l-2.5-2.5M17 13H8l2.5 2.5"/></svg>',
   planbascule:'<svg viewBox="0 0 20 20"><rect x="3" y="3.5" width="14" height="13" rx="1"/><path d="M6 7h8M6 10h8M6 13h5"/></svg>',
-  repetitions:'<svg viewBox="0 0 20 20"><path d="M5 8a5 5 0 019-2.5V3.5M15 12a5 5 0 01-9 2.5v2"/><path d="M14 5.5h1.5V4M6 14.5H4.5V16"/></svg>'
+  repetitions:'<svg viewBox="0 0 20 20"><path d="M5 8a5 5 0 019-2.5V3.5M15 12a5 5 0 01-9 2.5v2"/><path d="M14 5.5h1.5V4M6 14.5H4.5V16"/></svg>',
+  risques:'<svg viewBox="0 0 20 20"><path d="M10 3l7.5 13H2.5z"/><path d="M10 8v3.5M10 14v.02"/></svg>',
+  decisions:'<svg viewBox="0 0 20 20"><path d="M10 3v3M10 14v3M4 10H2.5M17.5 10H16"/><circle cx="10" cy="10" r="4"/></svg>',
+  sponsor:'<svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"/><path d="M6.5 10.5l2.2 2.2L14 8"/></svg>',
+  mondomaine:'<svg viewBox="0 0 20 20"><rect x="2.5" y="2.5" width="7" height="7" rx="1"/><rect x="11" y="2.5" width="6.5" height="7" rx="1"/><rect x="2.5" y="11" width="7" height="6.5" rx="1"/><path d="M13 13.2l1.6 1.6 3-3.4"/></svg>',
+  processus:'<svg viewBox="0 0 20 20"><path d="M4 4h5v4H4zM11 12h5v4h-5z"/><path d="M6.5 8v4h5"/></svg>'
 };
 const VUES = [
   {id:'dashboard',g:'Pilotage',nom:'Vue d\'ensemble',titre:'Vue d\'ensemble'},
+  {id:'sponsor',  g:'Pilotage',nom:'Vue Sponsor',titre:'Vue Sponsor — statut du projet'},
+  {id:'mondomaine', g:'Pilotage',nom:'Mon domaine',titre:'Mon domaine — mes actions, ma charge, mes échéances'},
   {id:'contrat',  g:'Pilotage',nom:'Contrat projet',titre:'Contrat projet — charte et règles de fonctionnement'},
   {id:'gantt',    g:'Pilotage',nom:'Gantt & WBS',titre:'Gantt — décomposition par phase'},
   {id:'plan',     g:'Pilotage',nom:'Plan d\'action',titre:'Plan d\'action et suivi des tâches'},
@@ -1384,8 +1441,11 @@ const VUES = [
   {id:'acteurs',  g:'Pilotage',nom:'Acteurs projet',titre:'Acteurs projet'},
   {id:'dispo',    g:'Pilotage',nom:'Disponibilités -Bêta',titre:'Disponibilités et plan de charge'},
   {id:'admin',    g:'Pilotage',nom:'Administration',titre:'Administration et paramètres généraux'},
+  {id:'risques',   g:'Gouvernance',nom:'Risques',   titre:'Registre des risques — objet autonome'},
+  {id:'decisions', g:'Gouvernance',nom:'Décisions', titre:'Registre des décisions — objet autonome'},
   {id:'tdb',      g:'Tableau de bord',nom:'Mes éléments',titre:'Tableau de bord — éléments attribués'},
-  {id:'perimetre',g:'Solution',nom:'Définition du périmètre',titre:'Définition du périmètre — processus'},
+  {id:'perimetre',g:'Solution',nom:'Périmètre',titre:'Périmètre — métiers outillés et lotissement'},
+  {id:'processus',g:'Solution',nom:'Processus',titre:'Processus — référentiel bout-en-bout et décomposition'},
   {id:'cible',    g:'Solution',nom:'Définition de la solution cible',titre:'Définition de la solution cible'},
   {id:'real',     g:'Solution',nom:'Réalisation de la solution',titre:'Réalisation de la solution'},
   {id:'demandes', g:'Solution',nom:'Demandes',titre:'Demandes ouvertes et terminées'},
@@ -1404,13 +1464,57 @@ const VUES = [
 ];
 const navOpen = new Set();
 let vue = 'dashboard';
+// Lot 2 — routage par population. Cible provisoire tant que les tableaux de
+// bord dédiés ne sont pas construits (externe -> lot 5) : direction,
+// contributeur et sponsor ont désormais un point d'entrée pertinent.
+// Il suffira de changer la valeur ci-dessous quand l'écran externe existera
+// — rien d'autre à toucher.
+const POP_LANDING = {
+  direction:    'dashboard',
+  sponsor:      'sponsor',
+  contributeur: 'mondomaine',
+  externe:      'dashboard'     // provisoire — remplacé par l'écran dédié (lot 5)
+};
+const POP_LANDING_LABEL = {
+  direction:    'Vue d\'ensemble',
+  sponsor:      'Vue Sponsor',
+  contributeur: 'Mon domaine',
+  externe:      'Vue d\'ensemble'
+};
+function maPopulation(){
+  if(PERSIST.mode!=='cloud') return null;
+  const me=monActeurId(); if(!me) return null;
+  const a=acteurById(me); return a? (a.population||null) : null;
+}
+// true = rail complet (tous les groupes) ; false = rail réduit au seul point
+// d'entrée de la population, avec un bouton pour basculer en complet.
+let railFull = true;
 
 const BETA_GROUPES = new Set(['Solution','Sécurité fonctionnelle','Préparation des utilisateurs','Modèle de données','Préparation bascule']);
 function buildNav(){
+  if(!railFull){
+    const pop = maPopulation();
+    const cible = POP_LANDING[pop] || 'dashboard';
+    const label = POP_LANDING_LABEL[pop] || 'Vue d\'ensemble';
+    $('#nav').innerHTML = `
+      <div class="navgroup is-open">
+        <div class="navgroup__items">
+          <button class="navitem${vue===cible?' is-active':''}" data-vue="${cible}">${ICONS[cible]||ICONS._def}<span>${esc(label)}</span></button>
+        </div>
+      </div>
+      <div style="padding:10px 9px;margin-top:4px">
+        <button id="nav_voirtout" style="width:100%;background:none;border:1px solid rgba(255,255,255,.18);color:#B4C1CF;padding:6px 9px;border-radius:var(--r);cursor:pointer;font-size:11.5px;text-align:left">Voir tout le projet →</button>
+      </div>`;
+    $('#nav').onclick = e => { const b=e.target.closest('[data-vue]'); if(b) go(b.dataset.vue); };
+    const vt=$('#nav_voirtout'); if(vt) vt.onclick=()=>{ railFull=true; buildNav(); };
+    return;
+  }
   const groupes=[...new Set(VUES.map(v=>v.g))];
   const gActive=(VUES.find(v=>v.id===vue)||{}).g;
   navOpen.add(gActive);
-  $('#nav').innerHTML = groupes.map(g=>{
+  const pop = maPopulation();
+  const retour = pop? `<button id="nav_retour" style="width:100%;background:none;border:1px solid rgba(255,255,255,.18);color:#B4C1CF;padding:6px 9px;border-radius:var(--r);cursor:pointer;font-size:11px;text-align:left;margin:2px 8px 8px">← ${esc(POP_LANDING_LABEL[pop]||'Mon tableau de bord')}</button>` : '';
+  $('#nav').innerHTML = retour + groupes.map(g=>{
     const ouvert=navOpen.has(g);
     return `<div class="navgroup${ouvert?' is-open':''}" data-grp="${esc(g)}">
       <button class="navgroup__h" data-toggle="${esc(g)}"><span>${esc(g)}${BETA_GROUPES.has(g)?' -Bêta':''}</span><span class="chev">${ouvert?'▾':'▸'}</span></button>
@@ -1418,6 +1522,7 @@ function buildNav(){
         `<button class="navitem${v.id===vue?' is-active':''}" data-vue="${v.id}">${ICONS[v.id]||ICONS._def}<span>${v.nom}</span></button>`).join('')}</div></div>`;
   }).join('');
   $('#nav').onclick = e => {
+    const rt=e.target.closest('#nav_retour'); if(rt){ railFull=false; go(POP_LANDING[maPopulation()]||'dashboard'); return; }
     const t=e.target.closest('[data-toggle]');
     if(t){ const g=t.dataset.toggle; navOpen.has(g)?navOpen.delete(g):navOpen.add(g); buildNav(); return; }
     const b=e.target.closest('[data-vue]'); if(b) go(b.dataset.vue);
@@ -1443,11 +1548,12 @@ function render(){
   const h = horizon();
   const mois = monthsRange(h.debut,h.fin).length;
   $('#pageSub').textContent = `${fmtFR(h.debut)} → ${fmtFR(h.fin)} · ${mois} mois · ${state.taches.length} lignes de WBS`;
-  (({dashboard:renderDashboard,gantt:renderGantt,plan:renderPlan,acteurs:renderActeurs,dispo:renderDispo,
-    admin:renderAdmin,perimetre:renderPerimetre,transfo:renderTransfo,formation:renderFormation,
+  (({dashboard:renderDashboard,sponsor:renderSponsorVue,mondomaine:renderMonDomaine,gantt:renderGantt,plan:renderPlan,acteurs:renderActeurs,dispo:renderDispo,
+    admin:renderAdmin,perimetre:renderPerimetre,processus:renderProcessus,transfo:renderTransfo,formation:renderFormation,
     comm:renderComm,budget:renderBudget,contrat:renderContrat,tdb:renderTDB,cible:renderCible,real:renderReal,
     demandes:renderDemandes,vunit:renderVUnit,vcomplete:renderVComplete,roles:renderRoles,planform:renderPlanForm,
-    donnees:renderDonnees,bascule:renderBascule,planbascule:renderPlanBascule,repetitions:renderRepetitions,feedback:renderFeedback,success:renderSuccess})[vue]||(()=>{}))();
+    donnees:renderDonnees,bascule:renderBascule,planbascule:renderPlanBascule,repetitions:renderRepetitions,feedback:renderFeedback,success:renderSuccess,
+    risques:renderRisques,decisions:renderDecisions})[vue]||(()=>{}))();
 }
 function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1800); }
 
@@ -1541,6 +1647,105 @@ function renderDashboard(){
         <td><span class="tag" style="color:${p.couleur}">${esc(p.nom)}</span></td><td>${esc(acteurNom(j.responsableId))}</td>
         <td><span class="tag ${late?'tag--late':st.cls}">${late?'En retard':st.nom}</span></td></tr>`;}).join('')||'<tr><td colspan="5" class="muted">Aucun jalon défini.</td></tr>'}</tbody></table></div>`;
   const ds=$('#dashSeg'); if(ds) ds.onclick=e=>{ const b=e.target.closest('[data-dd]'); if(b){ dashDetail=Number(b.dataset.dd); renderDashboard(); } };
+}
+
+/* ============================================================
+   VUE SPONSOR — statut projet (calculé) — lot 3
+   ============================================================ */
+function budgetTotaux(){
+  const b=state.budget||[]; const sum=k=>b.reduce((s,x)=>s+(Number(x[k])||0),0);
+  return {prevu:sum('montantPrevu'), engage:sum('montantEngage'), realise:sum('montantRealise')};
+}
+const TRICOLORE_LABEL = {vert:'Dans les temps', orange:'Points de vigilance', rouge:'Alerte'};
+const TRICOLORE_COLOR = {vert:'var(--ok)', orange:'var(--signal)', rouge:'var(--alert)'};
+// Objet statutProjet (modele-de-donnees.md §J) : partie calculée (avancement,
+// budget, jalons, risques, décisions) recalculée en continu à chaque appel —
+// jamais stockée. Seule la partie éditorialisée (message, éventuel forçage
+// du statut tricolore) est persistée dans le singleton state.statutProjet.
+// La version figée/publiée (snapshot) est prévue au lot 5.
+function calculerStatutProjet(){
+  const feuilles = state.taches.filter(t=>!estParent(t.id)&&t.type!=='jalon');
+  const avancement = feuilles.length? Math.round(feuilles.reduce((s,t)=>s+(t.avancement||0),0)/feuilles.length):0;
+  const budget = budgetTotaux();
+  const valAtt = Number((state.charte||{}).valeurAttendue)||0;
+  const valeurProduite = valAtt * avancement/100;
+  const jalons = state.taches.filter(t=>t.type==='jalon').sort((a,b)=>a.debut.localeCompare(b.debut));
+  const jalonsAVenir = jalons.filter(j=>j.statut!=='fait').slice(0,5);
+  const jalonsRetard = jalons.filter(j=>j.statut!=='fait' && j.debut<today());
+  const risquesOuverts = (state.risques||[]).filter(r=>r.statut==='Ouvert')
+    .sort((a,b)=>((PROBA_POIDS[b.probabilite]||0)*(IMPACT_POIDS[b.impact]||0))-((PROBA_POIDS[a.probabilite]||0)*(IMPACT_POIDS[a.impact]||0)));
+  const risquesElevesOuverts = risquesOuverts.filter(r=>(PROBA_POIDS[r.probabilite]||0)*(IMPACT_POIDS[r.impact]||0)>=6);
+  const decisionsAttente = (state.decisions||[]).filter(d=>d.statut==='En attente').sort((a,b)=>(a.echeance||'9999').localeCompare(b.echeance||'9999'));
+  const decisionsRetard = decisionsAttente.filter(d=>d.echeance && d.echeance<today());
+  const budgetDepasse = budget.prevu>0 && budget.engage>budget.prevu;
+
+  let statutCalcule;
+  if(jalonsRetard.length || risquesElevesOuverts.length || budgetDepasse) statutCalcule='rouge';
+  else if(decisionsRetard.length || risquesOuverts.length) statutCalcule='orange';
+  else statutCalcule='vert';
+
+  const sp = state.statutProjet||{};
+  return {avancement, budget, valAtt, valeurProduite, jalonsAVenir, jalonsRetard, risquesOuverts, risquesElevesOuverts,
+    decisionsAttente, decisionsRetard, budgetDepasse, statutCalcule, statutTricolore: sp.statutOverride || statutCalcule};
+}
+function renderSponsorVue(){
+  const c = calculerStatutProjet();
+  const dev = state.params.devise;
+  const sp = state.statutProjet||{};
+  const peutEditer = PERSIST.mode!=='cloud' || (DB.canEdit && DB.canEdit());
+  const coul = TRICOLORE_COLOR[c.statutTricolore];
+  $('#view-sponsor').innerHTML = `
+    <div class="card" style="border-left:4px solid ${coul}">
+      <div class="card__head"><h2>Statut du projet</h2>
+        <span class="tag" style="color:${coul};border-color:${coul}">${TRICOLORE_LABEL[c.statutTricolore]}</span>
+        ${peutEditer?'<button class="btn btn--sm btn--ghost" id="sp_ed" style="margin-left:auto">Modifier la synthèse</button>':''}</div>
+      <div class="card__body">
+        <p style="margin:0">${sp.messageAvancement? esc(sp.messageAvancement).replace(/\n/g,'<br>') : '<span class="muted">Aucun message de synthèse renseigné pour l\'instant.</span>'}</p>
+        <p class="hint" style="margin:8px 0 0">Statut ${sp.statutOverride?'ajusté manuellement':'calculé automatiquement'} à partir des jalons, du budget, des risques et des décisions${sp.maj?' · message mis à jour '+fmtDT(sp.maj):''}</p>
+      </div>
+    </div>
+    <div class="kpis">
+      <div class="kpi"><div class="kpi__k">Avancement global</div><div class="kpi__v">${c.avancement} %</div><div class="kpi__n">${state.taches.filter(t=>!estParent(t.id)&&t.type!=='jalon').length} tâches élémentaires</div></div>
+      <div class="kpi"><div class="kpi__k">Budget engagé</div><div class="kpi__v">${c.budget.engage.toLocaleString('fr-FR')} ${dev}</div><div class="kpi__n">sur ${c.budget.prevu.toLocaleString('fr-FR')} ${dev} prévus</div></div>
+      <div class="kpi"><div class="kpi__k">Budget consommé</div><div class="kpi__v">${c.budget.realise.toLocaleString('fr-FR')} ${dev}</div><div class="kpi__n">réalisé à date</div></div>
+      <div class="kpi"><div class="kpi__k">Reste à engager</div><div class="kpi__v">${(c.budget.prevu-c.budget.engage).toLocaleString('fr-FR')} ${dev}</div><div class="kpi__n">${c.budgetDepasse?'budget dépassé':'dans l\'enveloppe'}</div></div>
+      <div class="kpi"><div class="kpi__k">Valeur produite</div><div class="kpi__v">${c.valAtt? c.valeurProduite.toLocaleString('fr-FR')+' '+dev : '—'}</div><div class="kpi__n">${c.valAtt? c.avancement+' % de la valeur attendue':'valeur attendue non renseignée (Contrat projet)'}</div></div>
+    </div>
+    <div class="card"><div class="card__head"><h2>Prochains jalons</h2></div>
+      ${c.jalonsAVenir.length? `<table class="tbl"><thead><tr><th>Date</th><th>Jalon</th><th>Phase</th><th>Statut</th></tr></thead>
+      <tbody>${c.jalonsAVenir.map(j=>{const p=phaseById(j.phaseId); const late=j.debut<today();
+        return `<tr><td class="mono ${late?'overdue':''}">${fmtFR(j.debut)}</td><td>${esc(j.nom)}</td><td><span class="tag" style="color:${p?p.couleur:''}">${esc(p?p.nom:'—')}</span></td>
+        <td><span class="tag ${late?'tag--late':statutDef(j.statut).cls}">${late?'En retard':statutDef(j.statut).nom}</span></td></tr>`;}).join('')}</tbody></table>`
+      : '<div class="card__body muted">Aucun jalon à venir.</div>'}</div>
+    <div class="card"><div class="card__head"><h2>Décisions en attente</h2><span class="section__count">${c.decisionsAttente.length}</span></div>
+      ${c.decisionsAttente.length? `<table class="tbl"><thead><tr><th>Décision</th><th>En attente de</th><th>Échéance</th></tr></thead>
+      <tbody>${c.decisionsAttente.slice(0,5).map(d=>{const late=d.echeance&&d.echeance<today();
+        return `<tr><td><strong>${esc(d.libelle)}</strong></td><td><span class="tag">${esc(d.instanceDecisionnaire||'—')}</span></td>
+        <td class="mono ${late?'overdue':''}">${d.echeance?fmtFR(d.echeance):'—'}</td></tr>`;}).join('')}</tbody></table>`
+      : '<div class="card__body muted">Aucune décision en attente.</div>'}</div>
+    <div class="card"><div class="card__head"><h2>Risques ouverts</h2><span class="section__count">${c.risquesOuverts.length}</span></div>
+      ${c.risquesOuverts.length? `<table class="tbl"><thead><tr><th>Risque</th><th>Probabilité</th><th>Impact</th><th>Échéance</th></tr></thead>
+      <tbody>${c.risquesOuverts.slice(0,5).map(r=>`<tr><td><strong>${esc(r.libelle)}</strong></td><td>${esc(r.probabilite||'—')}</td><td>${esc(r.impact||'—')}</td>
+        <td class="mono">${r.echeance?fmtFR(r.echeance):'—'}</td></tr>`).join('')}</tbody></table>`
+      : '<div class="card__body muted">Aucun risque ouvert.</div>'}</div>
+    <p class="hint">Vue calculée en continu à partir des registres du projet (jalons, budget, risques, décisions). La synthèse figée et partageable arrivera avec l'espace externes.</p>`;
+  const ed=$('#sp_ed'); if(ed) ed.onclick=()=>editStatutProjet();
+}
+function editStatutProjet(){
+  const sp=state.statutProjet||{};
+  modal({titre:'Modifier la synthèse du statut', corps:`
+    <label class="f"><span>Message d'avancement</span><textarea id="sp_msg" style="min-height:140px" placeholder="Un paragraphe à l'attention des sponsors : où en est-on, ce qui va bien, ce qui mérite leur attention.">${esc(sp.messageAvancement||'')}</textarea></label>
+    <label class="f"><span>Statut affiché</span><select id="sp_ov">
+      <option value="">Calculé automatiquement</option>
+      <option value="vert" ${sp.statutOverride==='vert'?'selected':''}>Forcer — Dans les temps</option>
+      <option value="orange" ${sp.statutOverride==='orange'?'selected':''}>Forcer — Points de vigilance</option>
+      <option value="rouge" ${sp.statutOverride==='rouge'?'selected':''}>Forcer — Alerte</option>
+    </select></label>
+    <p class="hint">Le statut est calculé automatiquement à partir des jalons, du budget, des risques et des décisions. Vous pouvez le forcer ponctuellement si le contexte le justifie — pensez à revenir en « Calculé automatiquement » une fois la situation résolue.</p>`,
+    onOk(r){
+      state.statutProjet = Object.assign({}, state.statutProjet, {messageAvancement:$('#sp_msg',r).value, statutOverride:$('#sp_ov',r).value||null, maj:nowStamp()});
+      persistSingleton('statutProjet'); toast('Synthèse mise à jour');
+    }});
 }
 
 /* ============================================================
@@ -1640,7 +1845,7 @@ const optStatuts = sel => STATUTS.map(s=>`<option value="${s.id}" ${sel===s.id?'
 /* ---------- édition d'une tâche WBS ---------- */
 function editTache(id, defaults={}){
   const t = id ? tacheById(id) : {phaseId:state.phases[0].id,parentId:null,type:'tache',nom:'',
-    debut:today(),fin:addDays(today(),9),avancement:0,charge:0,statut:'na',responsableId:null,dependances:[],note:'',...defaults};
+    debut:today(),fin:addDays(today(),9),avancement:0,charge:0,statut:'na',responsableId:null,dependances:[],note:'',domaineId:null,...defaults};
   const parents = state.taches.filter(x=>x.id!==id && !descendants(id||'').some(d=>d.id===x.id) && x.type!=='jalon');
   const jalon = t.type==='jalon';
   const parent = estParent(t.id);
@@ -1666,6 +1871,8 @@ function editTache(id, defaults={}){
       <label class="f"><span>Prédécesseur (fin → début)</span><select id="m_dep"><option value="">— Aucun —</option>${
         state.taches.filter(x=>x.id!==id).map(x=>`<option value="${x.id}" ${(t.dependances||[])[0]===x.id?'selected':''}>${esc(x.nom)}</option>`).join('')}</select></label>
     </div>
+    <label class="f"><span>Domaine</span><select id="m_dom"><option value="">— Transverse / non affecté —</option>${state.domaines.slice().sort((x,y)=>x.ordre-y.ordre).map(d=>`<option value="${d.id}" ${t.domaineId===d.id?'selected':''}>${esc(d.nom)}</option>`).join('')}</select></label>
+    <p class="hint" style="margin-top:-6px">Suggéré automatiquement à partir du domaine principal du responsable choisi ci-dessus — toujours modifiable.</p>
     <label class="f"><span>Notes</span><textarea id="m_note">${esc(t.note||'')}</textarea></label>
     ${parent?'<p class="hint">Les dates, la charge et l\'avancement de cette ligne sont consolidés automatiquement à partir de ses sous-tâches.</p>':''}`;
   modal({titre: id?'Modifier la tâche':'Nouvelle tâche', corps,
@@ -1678,13 +1885,17 @@ function editTache(id, defaults={}){
         debut:$('#m_debut',root).value, fin: type==='jalon'?$('#m_debut',root).value:$('#m_fin',root).value,
         responsableId:$('#m_resp',root).value||null, charge:Number($('#m_charge',root).value)||0,
         avancement:Number($('#m_av',root).value)||0, statut:$('#m_statut',root).value,
-        dependances:$('#m_dep',root).value?[$('#m_dep',root).value]:[], note:$('#m_note',root).value};
+        dependances:$('#m_dep',root).value?[$('#m_dep',root).value]:[], domaineId:$('#m_dom',root).value||null, note:$('#m_note',root).value};
       if(o.fin<o.debut) o.fin=o.debut;
       o.maj=nowStamp(); const isNew=!id;
       const target = id? Object.assign({}, tacheById(id), o) : Object.assign({id:uid('t'),creeLe:today()}, o);
       commitEntity('taches', target, isNew, isNew?'Tâche ajoutée':'Tâche modifiée');
       return false;
     }});
+  const respSel=$('#m_resp'); if(respSel) respSel.onchange=()=>{
+    const domSel=$('#m_dom'); if(!domSel || domSel.value) return; // ne jamais écraser un choix déjà fait
+    const a=acteurById(respSel.value); if(a && a.domainePrincipalId) domSel.value=a.domainePrincipalId;
+  };
   if(id) $('#m_del').onclick=()=>{
     const kids=descendants(id);
     if(kids.length && !confirm(`Supprimer aussi les ${kids.length} sous-tâches ?`)) return;
@@ -1961,6 +2172,7 @@ function renderPlanPrincipal(mount){
     return `<div class="section">
       <div class="section__head">
         <h3>${esc(sc.nom)}</h3><span class="section__count">${fait}/${tot} terminées</span>
+        ${sc.domaineId?(()=>{const d=domaineById(sc.domaineId);return d?`<span class="tag" style="color:${d.couleur}">${esc(d.nom)}</span>`:'';})():''}
         <div class="section__tools">
           <button class="btn btn--sm" data-addact="${sc.id}">Ajouter une action</button>
           <button class="btn btn--sm btn--ghost" data-rensec="${sc.id}">Renommer</button>
@@ -2028,13 +2240,15 @@ function renderPlanPrincipal(mount){
   };
 }
 function editSection(id){
-  const s = id? state.sections.find(x=>x.id===id) : {nom:'',ordre:state.sections.length+1};
+  const s = id? state.sections.find(x=>x.id===id) : {nom:'',ordre:state.sections.length+1,domaineId:null};
   modal({titre:id?'Renommer la section':'Nouvelle section',
     corps:`<label class="f"><span>Nom de la section</span><input type="text" id="s_nom" value="${esc(s.nom)}" placeholder="Ex. Risques à traiter"></label>
-           <label class="f"><span>Ordre d'affichage</span><input type="number" id="s_ord" value="${s.ordre}" min="1"></label>`,
+           <label class="f"><span>Ordre d'affichage</span><input type="number" id="s_ord" value="${s.ordre}" min="1"></label>
+           <label class="f"><span>Domaine</span><select id="s_dom"><option value="">— Transverse / non affecté —</option>${state.domaines.slice().sort((x,y)=>x.ordre-y.ordre).map(d=>`<option value="${d.id}" ${s.domaineId===d.id?'selected':''}>${esc(d.nom)}</option>`).join('')}</select></label>`,
     onOk(r){ const nom=$('#s_nom',r).value.trim(); if(!nom) return false;
       const isNew=!id;
-      const target = id? Object.assign({}, s, {nom,ordre:Number($('#s_ord',r).value)}) : {id:uid('sc'),nom,ordre:Number($('#s_ord',r).value)};
+      const o={nom,ordre:Number($('#s_ord',r).value),domaineId:$('#s_dom',r).value||null};
+      const target = id? Object.assign({}, s, o) : Object.assign({id:uid('sc')}, o);
       commitEntity('sections', target, isNew, isNew?'Section créée':'Section renommée');
       return false; }});
 }
@@ -2062,7 +2276,7 @@ function editAction(id, defaults={}){
       </div>
       <div class="grid2">
         <label class="f"><span>Domaine métier</span><select id="a_dom"><option value="">— Aucun —</option>${state.domaines.slice().sort((x,y)=>x.ordre-y.ordre).map(d=>`<option value="${d.id}" ${a.domaineId===d.id?'selected':''}>${esc(d.nom)}</option>`).join('')}</select></label>
-        <label class="f"><span>Processus outillé lié</span><select id="a_proc"><option value="">— Aucun —</option>${state.processus.map(p=>`<option value="${p.id}" ${a.processusId===p.id?'selected':''}>${esc(p.code)} — ${esc(p.nom)}</option>`).join('')}</select></label>
+        <label class="f"><span>Processus lié (terminal)</span><select id="a_proc"><option value="">— Aucun —</option>${state.processus.filter(procEstFeuille).sort((x,y)=>(x.code||'').localeCompare(y.code||'')).map(p=>`<option value="${p.id}" ${a.processusId===p.id?'selected':''}>${esc(p.code)} — ${esc(p.nom)}</option>`).join('')}</select></label>
       </div>`,
     onOk(r){
       const titre=$('#a_t',r).value.trim(); if(!titre){toast('Indiquez un intitulé.');return false;}
@@ -2386,10 +2600,34 @@ function renderAdmin(){
         <button class="btn" id="ad_exp">Exporter le projet (JSON)</button>
         <button class="btn" id="ad_expcsv">Exporter des données en CSV</button>
         <button class="btn" id="ad_imp">Importer un fichier</button>
+        <button class="btn" id="ad_regproc">Régénérer les processus (démo)</button>
         <button class="btn btn--danger" id="ad_demo">Recharger le projet de démonstration</button>
         <button class="btn btn--danger" id="ad_vide">Repartir d'un projet vide</button>
       </div>
+      <p class="hint" style="margin:10px 0 0">« Régénérer les processus » remplace uniquement le référentiel de processus (bout-en-bout et décomposition) par le jeu de démonstration, sans toucher au reste du projet. Utile après la mise à jour du modèle Solution.</p>
     </div></div>`;
+
+  $('#ad_regproc').onclick=async ()=>{
+    if(!confirm('Remplacer TOUT le référentiel de processus (bout-en-bout + N1/N2/N3) par le jeu de démonstration ?\n\nLe reste du projet (acteurs, tâches, budget…) n\'est pas touché. Cette action est irréversible.')) return;
+    const btn=$('#ad_regproc'); btn.disabled=true; btn.textContent='Régénération…';
+    try{
+      const nouveaux = seedProcessus(i=>(state.acteurs[i]||state.acteurs[0]||{}).id, state.systemes||[], state.domaines||[]);
+      if(PERSIST.mode==='cloud'){
+        // supprimer l'existant côté cloud puis publier le nouveau
+        const res = await DB.loadAll();
+        const anciens = res.collections['processus']||[];
+        for(const o of anciens){ await DB.deleteItem('processus', o.id); }
+        await DB.bulkUpsert('processus', nouveaux);
+        // recharger proprement depuis le cloud
+        const rechargé = await DB.loadAll();
+        state.processus = (rechargé.collections['processus']||[]);
+      } else {
+        state.processus = nouveaux; save();
+      }
+      render(); toast('Référentiel de processus régénéré ('+nouveaux.length+' entrées)');
+    }catch(e){ console.error(e); toast('Échec de la régénération : '+((e&&e.message)||'erreur')); }
+    btn.disabled=false; btn.textContent='Régénérer les processus (démo)';
+  };
 
   $('#ad_save').onclick=()=>{
     Object.assign(state.projet,{nom:$('#ad_nom').value,code:$('#ad_code').value,sponsor:$('#ad_sp').value,
@@ -2438,7 +2676,7 @@ function renderAdmin(){
     const s=seed();
     state={...s, taches:[], acteurs:[], dispos:{}, chargePrevue:{}, tarifMensuel:{}, absences:[], actions:[], sections:[{id:uid('sc'),nom:'Suivi général',ordre:1}],
       commGroupes:[],evenements:[],regles:[],budget:[],realisation:[],demandes:[],documents:[],attendus:[],
-      roles:[],boutEnBout:[],planBascule:[],bascule:[],repetitions:[],photos:[],donnees:[],campagnes:[],budgetVersions:[],
+      roles:[],boutEnBout:[],planBascule:[],bascule:[],repetitions:[],photos:[],donnees:[],campagnes:[],budgetVersions:[],risques:[],decisions:[],
       projet:{...s.projet,nom:'Nouveau projet',code:'PRJ-001',description:''}};
     collapsed.clear(); if(PERSIST.mode==='cloud'){ resetCloud().then(()=>{render(); toast('Projet vide créé');}); } else { save(); render(); toast('Projet vide créé'); } } };
 }
@@ -2806,11 +3044,21 @@ const JEUX = {
       lignes:state.systemes.map(s=>[s.nom,s.editeur,s.domaine,s.base,s.sgbd,s.environnement,s.criticite,s.volumetrie,
         s.interface?'Oui':'Non',s.devenir,acteurNom(s.responsableId),s.commentaire||''])};
   }},
-  perimetre:{nom:'Périmètre solution', build(){
+  perimetre:{nom:'Périmètre — métiers et lots', build(){
+    return {entetes:['Domaine métier','Lot retenu','Propriétaire du processus','Responsable','Ordre'],
+      lignes:state.domaines.slice().sort((a,b)=>(a.ordre||0)-(b.ordre||0)).map(d=>[
+        d.nom,(lotDef(d.lot||'lot1')||{}).nom||'',d.proprietaireProcessusId?acteurNom(d.proprietaireProcessusId):'',
+        d.responsableId?acteurNom(d.responsableId):'',d.ordre||''])};
+  }},
+  processus:{nom:'Processus — référentiel hiérarchique', build(){
     const dom=id=>(state.domaines.find(d=>d.id===id)||{}).nom||'';
-    return {entetes:['Domaine métier','Code','Processus niveau 1','Statut de validation','Couverture','Criticité','Responsable','Atelier','Commentaire'],
-      lignes:state.processus.map(p=>[dom(p.domaineId),p.code,p.nom,VALID.find(v=>v.id===p.statut).nom,p.couverture,
-        p.criticite,acteurNom(p.responsableId),p.atelier||'',p.commentaire||''])};
+    const rows=[];
+    const walk=(p,chemin)=>{ const c=chemin?chemin+' > '+p.nom:p.nom;
+      rows.push([niveauDef(p.niveau).court,p.code,p.nom,c,dom(p.domaineId),p.referentId?acteurNom(p.referentId):'',
+        p.criticite||'',outilNom(p.outilActuelId),p.transverse?'Oui':'Non',procEstFeuille(p)?'Oui':'Non']);
+      procEnfants(p).sort((a,b)=>(a.code||'').localeCompare(b.code||'')).forEach(e=>walk(e,c)); };
+    state.processus.filter(p=>p.niveau==='b2b').sort((a,b)=>(a.code||'').localeCompare(b.code||'')).forEach(b=>walk(b,''));
+    return {entetes:['Niveau','Code','Libellé','Chemin complet','Domaine métier','Référent','Criticité','Outil actuel','Transverse','Terminal'],lignes:rows};
   }},
   transformations:{nom:'Transformations', build(){
     const dom=id=>(state.domaines.find(d=>d.id===id)||{}).nom||'';
@@ -2927,99 +3175,66 @@ const VALID=[
   {id:'hors',  nom:'Hors périmètre',   poids:null,cls:'v-hors'}
 ];
 const COUVERTURES=['Standard','Paramétrage','Spécifique','Interface','Non couvert','À qualifier'];
+// Lotissement du périmètre (nouveau modèle Solution) — porté par le Domaine Métier.
+const LOTS = [
+  {id:'lot1', nom:'Lot 1',          cls:'tag--run'},
+  {id:'lot2', nom:'Lot 2',          cls:'tag--run'},
+  {id:'lot3', nom:'Lot 3',          cls:'tag--run'},
+  {id:'hp',   nom:'Hors périmètre', cls:'tag--todo'}
+];
+const lotDef = id => LOTS.find(l=>l.id===id) || null;
 const validDef=id=>VALID.find(v=>v.id===id)||VALID[0];
-function avancementDomaine(dId){
-  const ps=state.processus.filter(p=>p.domaineId===dId && p.statut!=='hors');
-  if(!ps.length) return 0;
-  return Math.round(ps.reduce((s,p)=>s+validDef(p.statut).poids,0)/ps.length);
-}
-function mesActionsOuvertes(){
-  const me=monActeurId(); if(!me) return [];
-  return state.actions.filter(a=>a.responsableId===me && a.statut!=='fait');
-}
-function actionsDeMonDomaine(){
-  const me=monActeurId(); const a=me?acteurById(me):null;
-  if(!a || !a.domainePrincipalId) return [];
-  return state.actions.filter(x=>x.statut!=='fait' && domaineDeAction(x)===a.domainePrincipalId);
-}
-function miniActionsCard(titre, list, vide){
-  if(!list.length) return '';
-  const retard=a=>a.statut!=='fait'&&a.echeance&&a.echeance<today();
-  return `<div class="card"><div class="card__head"><h2>${esc(titre)}</h2><span class="section__count">${list.length}</span></div>
-    <table class="tbl"><thead><tr><th>Action</th><th style="width:140px">Domaine</th><th style="width:104px">Échéance</th><th style="width:110px">Statut</th><th style="width:56px"></th></tr></thead>
-    <tbody>${list.slice().sort((a,b)=>(a.echeance||'9').localeCompare(b.echeance||'9')).map(a=>{
-      const dm=domaineDeAction(a), dom=dm?domaineById(dm):null;
-      return `<tr><td>${esc(a.titre)}</td><td>${dom?`<span class="tag" style="color:${dom.couleur}">${esc(dom.nom)}</span>`:'—'}</td>
-        <td class="mono ${retard(a)?'overdue':''}">${fmtFR(a.echeance)}</td>
-        <td><span class="tag ${retard(a)?'tag--late':statutDef(a.statut).cls}">${retard(a)?'En retard':statutDef(a.statut).nom}</span></td>
-        <td><button class="btn btn--sm btn--ghost" data-editact="${a.id}">✎</button></td></tr>`;}).join('')}</tbody></table></div>`;
-}
-/* === PÉRIMÈTRE MÉTIER — domaines & processus (cf. Lot 1b — domaineId) === */
+/* === PÉRIMÈTRE — métiers (Domaines Métier) outillés par le projet, avec Lot retenu.
+   L'édition du Domaine Métier reste dans editDomaine() ; cet écran ne gère que
+   le cadrage du périmètre. Les processus ont désormais leur propre écran. === */
 function renderPerimetre(){
-  const ps=state.processus.filter(p=>p.statut!=='hors');
-  const global = ps.length? Math.round(ps.reduce((s,p)=>s+validDef(p.statut).poids,0)/ps.length):0;
-  const cpt = id => state.processus.filter(p=>p.statut===id).length;
-  const kpis=[
-    ['Validation de la solution', global+' %', `${state.processus.length} processus niveau 1`],
-    ['Validés en COPIL', String(cpt('copil')), `sur ${ps.length} processus du périmètre`],
-    ['En arbitrage', String(cpt('arbitrage')), 'à trancher pour tenir le gel du périmètre'],
-    ['Spécifiques identifiés', String(state.processus.filter(p=>p.couverture==='Spécifique').length), 'à chiffrer et à justifier'],
-    ['Hors périmètre', String(cpt('hors')), 'restent sur les systèmes existants']
+  const doms = state.domaines.slice().sort((a,b)=>(a.ordre||0)-(b.ordre||0));
+  const dansPerimetre = doms.filter(d=>(d.lot||'lot1')!=='hp');
+  const cptLot = id => doms.filter(d=>(d.lot||'lot1')===id).length;
+  const kpis = [
+    ['Métiers dans le périmètre', String(dansPerimetre.length), `sur ${doms.length} métiers recensés`],
+    ['Lot 1', String(cptLot('lot1')), 'premier jalon de déploiement'],
+    ['Lot 2', String(cptLot('lot2')), ''],
+    ['Lot 3', String(cptLot('lot3')), ''],
+    ['Hors périmètre', String(cptLot('hp')), 'restent sur les systèmes existants']
   ];
-  const briques = state.domaines.slice().sort((a,b)=>a.ordre-b.ordre).map(d=>{
-    const list=state.processus.filter(p=>p.domaineId===d.id).sort((a,b)=>a.code.localeCompare(b.code));
-    const av=avancementDomaine(d.id);
-    return `<div class="brick" style="--bc:${d.couleur}">
-      <div class="brick__head">
-        <div class="brick__title"><span class="dot" style="background:${d.couleur}"></span>${esc(d.nom)}</div>
-        <div class="brick__pct mono">${av}%</div>
-        <button class="btn btn--sm btn--ghost" data-eddom="${d.id}" title="Modifier le domaine">✎</button>
-      </div>
-      <div class="brick__bar"><i style="width:${av}%;background:${d.couleur}"></i></div>
-      <div class="brick__meta">${esc(d.responsableId?acteurNom(d.responsableId):'Responsable à désigner')} · ${list.length} processus</div>
-      <div class="procs">${list.map(p=>`<button class="proc ${validDef(p.statut).cls}" data-edproc="${p.id}">
-          <span class="proc__code mono">${esc(p.code)}</span>
-          <span class="proc__nom">${esc(p.nom)}</span>
-          <span class="proc__cov">${esc(p.couverture)}</span>
-          <span class="proc__st">${validDef(p.statut).nom}</span>
-        </button>`).join('') || '<div class="action-empty" style="padding:8px 0">Aucun processus recensé.</div>'}</div>
-      <button class="btn btn--sm brick__add" data-addproc="${d.id}">Ajouter un processus</button>
-    </div>`;
+  const rows = doms.map(d=>{
+    const l = lotDef(d.lot||'lot1');
+    const hp = (d.lot||'lot1')==='hp';
+    return `<tr style="${hp?'opacity:.6':''}">
+      <td><span class="dot" style="background:${d.couleur};display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;vertical-align:middle"></span><strong>${esc(d.nom)}</strong></td>
+      <td>${l?`<span class="tag ${l.cls}">${l.nom}</span>`:'<span class="muted">—</span>'}</td>
+      <td>${d.proprietaireProcessusId?esc(acteurNom(d.proprietaireProcessusId)):'<span class="muted">À désigner</span>'}</td>
+      <td>${d.responsableId?esc(acteurNom(d.responsableId)):'<span class="muted">—</span>'}</td>
+      <td><button class="btn btn--sm btn--ghost" data-eddom="${d.id}">✎</button></td></tr>`;
   }).join('');
 
-  $('#view-perimetre').innerHTML=`
+  $('#view-perimetre').innerHTML = `
     <div class="kpis">${kpis.map(k=>`<div class="kpi"><div class="kpi__k">${k[0]}</div><div class="kpi__v">${esc(k[1])}</div><div class="kpi__n">${esc(k[2])}</div></div>`).join('')}</div>
-    <div class="card"><div class="card__body" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:11px 14px">
-      <span class="mono muted" style="font-size:10.5px;letter-spacing:.08em;text-transform:uppercase">Avancement de la validation</span>
-      <div class="prog" style="flex:1;height:8px"><i style="width:${global}%"></i></div>
-      <span class="mono">${global} %</span>
-      <div style="display:flex;gap:8px;margin-left:14px">
-        <button class="btn" id="pe_csv">Exporter en CSV</button>
-        <button class="btn" id="pe_addact">Ajouter une action</button>
-        <button class="btn btn--primary" id="pe_adddom">Ajouter un domaine</button>
-      </div>
-    </div></div>
-    ${miniActionsCard('Relevé — actions qui me sont affectées', mesActionsOuvertes())}
-    ${miniActionsCard('À suivre — actions nécessaires à mon domaine', actionsDeMonDomaine())}
-    <div class="legend" style="margin:0 0 14px">${VALID.map(v=>`<span><i class="lg ${v.cls}"></i>${v.nom}</span>`).join('')}</div>
-    <div class="bricks">${briques}</div>`;
+    <div class="card">
+      <div class="card__head"><h2>Métiers outillés par le projet</h2>
+        <button class="btn btn--primary btn--sm" id="pe_adddom" style="margin-left:auto">Ajouter un métier</button></div>
+      ${doms.length? `<table class="tbl">
+        <thead><tr><th>Domaine métier</th><th style="width:130px">Lot retenu</th><th style="width:200px">Propriétaire du processus</th><th style="width:200px">Responsable</th><th style="width:44px"></th></tr></thead>
+        <tbody>${rows}</tbody></table>`
+      : '<div class="card__body muted">Aucun métier recensé. Ajoutez le premier pour cadrer le périmètre.</div>'}
+      <div class="card__body"><p class="hint" style="margin:0">Chaque métier est classé dans un lot de déploiement (Lot 1 / 2 / 3) ou marqué hors périmètre. Le propriétaire du processus est le référent interne responsable du métier côté client.</p></div>
+    </div>`;
 
   $('#pe_adddom').onclick=()=>editDomaine(null);
-  $('#pe_addact').onclick=()=>editAction(null,{});
-  $('#pe_csv').onclick=()=>exportCSV('perimetre');
   $('#view-perimetre').onclick=e=>{
-    const ea=e.target.closest('[data-editact]'); if(ea){ editAction(ea.dataset.editact); return; }
-    const b=e.target.closest('[data-eddom],[data-addproc],[data-edproc]'); if(!b) return;
-    if(b.dataset.eddom) editDomaine(b.dataset.eddom);
-    else if(b.dataset.addproc) editProcessus(null,{domaineId:b.dataset.addproc});
-    else editProcessus(b.dataset.edproc);
+    const b=e.target.closest('[data-eddom]'); if(b) editDomaine(b.dataset.eddom);
   };
 }
 function editDomaine(id){
-  const d = id? state.domaines.find(x=>x.id===id) : {nom:'',couleur:'#3C63E0',ordre:state.domaines.length+1,responsableId:null,commentaire:''};
+  const d = id? state.domaines.find(x=>x.id===id) : {nom:'',couleur:'#3C63E0',ordre:state.domaines.length+1,responsableId:null,commentaire:'',lot:'lot1',proprietaireProcessusId:null};
   modal({titre:id?'Modifier le domaine métier':'Nouveau domaine métier',
     extra:id?'<button class="btn btn--danger left" id="do_del">Supprimer</button>':'',
     corps:`<label class="f"><span>Domaine métier</span><input type="text" id="d_n" value="${esc(d.nom)}" placeholder="Ex. Ventes et administration des ventes"></label>
+      <div class="grid2">
+        <label class="f"><span>Lot retenu</span><select id="d_lot">${LOTS.map(l=>`<option value="${l.id}" ${(d.lot||'lot1')===l.id?'selected':''}>${l.nom}</option>`).join('')}</select></label>
+        <label class="f"><span>Propriétaire du processus (interne)</span><select id="d_pp">${optActeurs(d.proprietaireProcessusId)}</select></label>
+      </div>
       <div class="grid3">
         <label class="f"><span>Ordre</span><input type="number" id="d_o" value="${d.ordre}" min="1"></label>
         <label class="f"><span>Couleur</span><input type="color" id="d_c" value="${d.couleur}" style="height:30px;padding:1px"></label>
@@ -3027,7 +3242,8 @@ function editDomaine(id){
       </div>
       <label class="f"><span>Commentaire</span><textarea id="d_co">${esc(d.commentaire||'')}</textarea></label>`,
     onOk(r){ const nom=$('#d_n',r).value.trim(); if(!nom) return false;
-      const o={nom,ordre:Number($('#d_o',r).value)||1,couleur:$('#d_c',r).value,responsableId:$('#d_r',r).value||null,commentaire:$('#d_co',r).value};
+      const o={nom,ordre:Number($('#d_o',r).value)||1,couleur:$('#d_c',r).value,responsableId:$('#d_r',r).value||null,commentaire:$('#d_co',r).value,
+        lot:$('#d_lot',r).value||'lot1',proprietaireProcessusId:$('#d_pp',r).value||null};
       o.maj=nowStamp(); const isNew=!id;
       const target = id? Object.assign({}, d, o) : Object.assign({id:uid('dm'),creeLe:today()}, o);
       commitEntity('domaines', target, isNew, isNew?'Domaine ajouté':'Domaine modifié');
@@ -3042,35 +3258,201 @@ function editDomaine(id){
     }catch(e){ handleWriteError(e,'domaines',id); } })();
   };
 }
-function editProcessus(id,defaults={}){
-  const p = id? state.processus.find(x=>x.id===id) : {domaineId:(state.domaines[0]||{}).id,code:'',nom:'',
-    statut:'non',couverture:'À qualifier',criticite:'Majeur',responsableId:null,atelier:'',commentaire:'',...defaults};
-  const opt=(arr,v)=>arr.map(o=>`<option ${o===v?'selected':''}>${o}</option>`).join('');
-  modal({titre:id?'Modifier le processus':'Nouveau processus niveau 1',
-    extra:id?'<button class="btn btn--danger left" id="pr_del">Supprimer</button>':'',
-    corps:`<div class="grid2">
-      <label class="f"><span>Domaine métier</span><select id="p_d">${state.domaines.map(d=>`<option value="${d.id}" ${p.domaineId===d.id?'selected':''}>${esc(d.nom)}</option>`).join('')}</select></label>
-      <label class="f"><span>Code</span><input type="text" id="p_c" value="${esc(p.code)}" placeholder="Ex. FIN-03"></label></div>
-      <label class="f"><span>Processus outillé</span><input type="text" id="p_n" value="${esc(p.nom)}" placeholder="Ex. Facturation fournisseur"></label>
-      <div class="grid3">
-        <label class="f"><span>Statut de validation</span><select id="p_s">${VALID.map(v=>`<option value="${v.id}" ${p.statut===v.id?'selected':''}>${v.nom}</option>`).join('')}</select></label>
-        <label class="f"><span>Couverture par l'ERP</span><select id="p_cv">${opt(COUVERTURES,p.couverture)}</select></label>
-        <label class="f"><span>Criticité</span><select id="p_cr">${opt(CRITICITES,p.criticite)}</select></label>
-      </div>
-      <div class="grid2">
-        <label class="f"><span>Responsable métier</span><select id="p_r">${optActeurs(p.responsableId)}</select></label>
-        <label class="f"><span>Atelier de référence</span><input type="text" id="p_a" value="${esc(p.atelier||'')}" placeholder="Ex. Atelier FIN-2 du 14/05"></label>
-      </div>
-      <label class="f"><span>Écarts et points ouverts</span><textarea id="p_co">${esc(p.commentaire||'')}</textarea></label>`,
-    onOk(r){ const nom=$('#p_n',r).value.trim(); if(!nom){toast('Indiquez le nom du processus.');return false;}
-      const o={domaineId:$('#p_d',r).value,code:$('#p_c',r).value.trim(),nom,statut:$('#p_s',r).value,
-        couverture:$('#p_cv',r).value,criticite:$('#p_cr',r).value,responsableId:$('#p_r',r).value||null,
-        atelier:$('#p_a',r).value,commentaire:$('#p_co',r).value};
+/* ============================================================
+   PROCESSUS — référentiel hiérarchique (bloc 2)
+   Bout-en-bout > N1 > N2 > N3. Remplace l'ancien processus plat
+   et l'objet bout-en-bout. Collection Supabase inchangée : 'processus'.
+   ============================================================ */
+const NIVEAUX = [
+  {id:'b2b', nom:'Bout-en-bout', court:'B2B', enfant:'n1'},
+  {id:'n1',  nom:'Niveau 1',     court:'N1',  enfant:'n2'},
+  {id:'n2',  nom:'Niveau 2',     court:'N2',  enfant:'n3'},
+  {id:'n3',  nom:'Niveau 3',     court:'N3',  enfant:null}
+];
+const niveauDef = id => NIVEAUX.find(n=>n.id===id) || NIVEAUX[0];
+const CRIT_HMB = ['Haute','Moyenne','Basse'];
+const critHmbCls = c => c==='Haute'?'tag--late':c==='Moyenne'?'tag--run':'tag--todo';
+const procEnfants = pid => state.processus.filter(p=>p.parentId===pid);
+const procEstFeuille = p => procEnfants(p.id).length===0;
+// liste dédoublonnée des outils (systèmes) par nom, pour le sélecteur
+function optOutils(sel){
+  const vus=new Set(); const opts=[];
+  (state.systemes||[]).forEach(s=>{ if(vus.has(s.nom)) return; vus.add(s.nom); opts.push(s); });
+  return '<option value="">— Aucun —</option>'+opts.map(s=>`<option value="${s.id}" ${sel===s.id?'selected':''}>${esc(s.nom)}</option>`).join('');
+}
+function outilNom(id){ const s=(state.systemes||[]).find(x=>x.id===id); return s?s.nom:''; }
+
+function editProcessus(id, defaults={}){
+  const p = id? state.processus.find(x=>x.id===id) : {parentId:null,niveau:'b2b',domaineId:(state.domaines[0]||{}).id,
+    code:'',nom:'',referentId:null,criticite:'Moyenne',outilActuelId:null,transverse:false,...defaults};
+  const niv = niveauDef(p.niveau);
+  // parents candidats = tous les processus du niveau juste au-dessus
+  const idxNiv = NIVEAUX.findIndex(n=>n.id===p.niveau);
+  const nivParent = idxNiv>0 ? NIVEAUX[idxNiv-1].id : null;
+  const parents = nivParent ? state.processus.filter(x=>x.niveau===nivParent) : [];
+  modal({titre:(id?'Modifier — ':'Nouveau — ')+niv.nom, corps:`
+    <div class="grid2">
+      <label class="f"><span>Niveau</span><input type="text" value="${niv.nom}" disabled></label>
+      <label class="f"><span>Code</span><input type="text" id="p_c" value="${esc(p.code)}" placeholder="Ex. ${niv.court}-001"></label>
+    </div>
+    ${nivParent? `<label class="f"><span>Rattaché à (${niveauDef(nivParent).nom})</span><select id="p_par">${parents.length?'':'<option value="">— aucun parent disponible —</option>'}${parents.map(x=>`<option value="${x.id}" ${p.parentId===x.id?'selected':''}>${esc(x.code)} · ${esc(x.nom)}</option>`).join('')}</select></label>` : ''}
+    <label class="f"><span>Libellé du processus</span><input type="text" id="p_n" value="${esc(p.nom)}" placeholder="Ex. Purchase to Pay"></label>
+    <div class="grid2">
+      <label class="f"><span>Domaine métier</span><select id="p_d">${state.domaines.slice().sort((a,b)=>a.ordre-b.ordre).map(d=>`<option value="${d.id}" ${p.domaineId===d.id?'selected':''}>${esc(d.nom)}</option>`).join('')}</select></label>
+      <label class="f"><span>Référent (projet)</span><select id="p_r">${optActeurs(p.referentId)}</select></label>
+    </div>
+    <div class="grid2">
+      <label class="f"><span>Criticité</span><select id="p_cr">${CRIT_HMB.map(c=>`<option ${p.criticite===c?'selected':''}>${c}</option>`).join('')}</select></label>
+      <label class="f"><span>Outil principal actuel</span><select id="p_ou">${optOutils(p.outilActuelId)}</select></label>
+    </div>
+    ${p.niveau==='b2b'? `<label class="f" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="p_tr" ${p.transverse?'checked':''} style="width:auto"><span style="margin:0">Bout-en-bout transverse (ex. Master Data Management)</span></label>` : ''}`,
+    extra: id?`<button class="btn btn--danger left" id="pr_del">Supprimer</button>`:'',
+    onOk(r){
+      const nom=$('#p_n',r).value.trim(); if(!nom){toast('Indiquez le libellé du processus.');return false;}
+      const parId = $('#p_par',r)? ($('#p_par',r).value||null) : null;
+      if(nivParent && !parId){ toast('Choisissez le processus parent.'); return false; }
+      const o={parentId:parId, niveau:p.niveau, domaineId:$('#p_d',r).value, code:$('#p_c',r).value.trim(), nom,
+        referentId:$('#p_r',r).value||null, criticite:$('#p_cr',r).value, outilActuelId:$('#p_ou',r).value||null,
+        transverse: $('#p_tr',r)? $('#p_tr',r).checked : (p.transverse||false)};
       o.maj=nowStamp(); const isNew=!id;
       const target = id? Object.assign({}, p, o) : Object.assign({id:uid('pr'),creeLe:today()}, o);
       commitEntity('processus', target, isNew, isNew?'Processus ajouté':'Processus modifié');
-      return false; }});
-  if(id) $('#pr_del').onclick=()=>deleteEntity('processus', id, 'Processus supprimé');
+      return false;
+    }});
+  if(id) $('#pr_del').onclick=()=>{
+    const desc=procDescendants(id);
+    if(desc.length && !confirm(`Ce processus a ${desc.length} sous-processus. Tout supprimer ?`)) return;
+    const ids=[id,...desc.map(d=>d.id)];
+    (async()=>{ try{
+      for(const pid of ids){ await PERSIST.deleteItem('processus', pid); }
+      $('#modalRoot').innerHTML=''; render(); toast('Processus supprimé');
+    }catch(e){ handleWriteError(e,'processus',id); } })();
+  };
+}
+function procDescendants(pid){
+  const out=[]; const stack=[pid];
+  while(stack.length){ const cur=stack.pop(); procEnfants(cur).forEach(c=>{ out.push(c); stack.push(c.id); }); }
+  return out;
+}
+
+let procDomFiltre='all';
+let procNivFiltre='all';
+let procQ='';
+let procMode='arbre';   // 'arbre' | 'table'
+let procOuvert=new Set();
+function renderProcessus(){
+  const cnt = lvl => state.processus.filter(p=>p.niveau===lvl).length;
+  const feuilles = state.processus.filter(procEstFeuille).length;
+  const kpis=[
+    ['Bout-en-bout', String(cnt('b2b')), state.processus.filter(p=>p.niveau==='b2b'&&p.transverse).length+' transverse(s)'],
+    ['Processus N1 / N2 / N3', `${cnt('n1')} / ${cnt('n2')} / ${cnt('n3')}`, 'décomposition'],
+    ['Processus terminaux', String(feuilles), 'lignes de conception et de recette'],
+    ['Total référentiel', String(state.processus.length), 'tous niveaux confondus']
+  ];
+  const critTag = c => c?`<span class="tag ${critHmbCls(c)}">${esc(c)}</span>`:'<span class="muted">—</span>';
+
+  // ---- barre d'outils commune ----
+  const barre = `<div class="card"><div class="card__body" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:11px 14px">
+      <div class="seg" id="pr_mode">
+        <button data-pm="arbre" class="${procMode==='arbre'?'is-active':''}">Arbre</button>
+        <button data-pm="table" class="${procMode==='table'?'is-active':''}">Tableau</button></div>
+      <label class="f" style="margin:0"><span>Domaine métier</span>
+        <select id="pr_domf" style="width:220px"><option value="all">Tous les domaines</option>${state.domaines.slice().sort((a,b)=>a.ordre-b.ordre).map(d=>`<option value="${d.id}" ${procDomFiltre===d.id?'selected':''}>${esc(d.nom)}</option>`).join('')}</select></label>
+      ${procMode==='table'?`<label class="f" style="margin:0"><span>Niveau</span>
+        <select id="pr_nivf" style="width:150px"><option value="all">Tous niveaux</option>${NIVEAUX.map(n=>`<option value="${n.id}" ${procNivFiltre===n.id?'selected':''}>${n.nom}</option>`).join('')}</select></label>
+        <label class="f" style="margin:0"><span>Rechercher</span><input type="text" id="pr_q" value="${esc(procQ)}" placeholder="Code ou libellé…" style="width:200px"></label>`:''}
+      <div style="margin-left:auto;display:flex;gap:8px">
+        ${procMode==='arbre'?'<button class="btn btn--sm" id="pr_expand">Tout déplier</button><button class="btn btn--sm" id="pr_collapse">Tout replier</button>':''}
+        <button class="btn" id="pr_csv">Exporter en CSV</button>
+        <button class="btn btn--primary" id="pr_addb2b">Ajouter un bout-en-bout</button></div>
+    </div></div>`;
+
+  let contenu='';
+  if(procMode==='arbre'){
+    const b2bs = state.processus.filter(p=>p.niveau==='b2b')
+      .filter(p=>procDomFiltre==='all'||p.domaineId===procDomFiltre)
+      .sort((a,b)=>(a.code||'').localeCompare(b.code||''));
+    const ligne = (p, prof) => {
+      const enf = procEnfants(p).sort((a,b)=>(a.code||'').localeCompare(b.code||''));
+      const ouvert = procOuvert.has(p.id);
+      const dom = domaineById(p.domaineId);
+      const feuille = enf.length===0;
+      const chevron = feuille? '<span style="display:inline-block;width:14px"></span>' : `<button class="btn btn--ghost btn--sm" data-toggle="${p.id}" style="padding:0 4px;line-height:1">${ouvert?'▾':'▸'}</button>`;
+      let html = `<tr data-niv="${p.niveau}"${feuille?' style="background:var(--surface-2)"':''}>
+        <td style="padding-left:${8+prof*20}px">${chevron}
+          <span class="mono muted" style="font-size:10.5px">${esc(p.code)}</span>
+          <span style="margin-left:6px;${p.niveau==='b2b'?'font-weight:600':''}">${esc(p.nom)}</span>
+          ${p.transverse?'<span class="tag" style="margin-left:6px">transverse</span>':''}
+          ${feuille?'<span class="tag tag--todo" style="margin-left:6px">terminal</span>':''}</td>
+        <td>${niveauDef(p.niveau).court}</td>
+        <td>${dom?`<span class="tag" style="color:${dom.couleur}">${esc(dom.nom)}</span>`:'<span class="muted">—</span>'}</td>
+        <td>${p.referentId?esc(acteurNom(p.referentId)):'<span class="muted">—</span>'}</td>
+        <td>${critTag(p.criticite)}</td>
+        <td>${p.outilActuelId?esc(outilNom(p.outilActuelId)):'<span class="muted">—</span>'}</td>
+        <td style="white-space:nowrap">
+          ${niveauDef(p.niveau).enfant?`<button class="btn btn--sm btn--ghost" data-add="${p.id}" title="Ajouter un ${niveauDef(niveauDef(p.niveau).enfant).court}">+ ${niveauDef(niveauDef(p.niveau).enfant).court}</button>`:''}
+          <button class="btn btn--sm btn--ghost" data-ed="${p.id}">✎</button></td></tr>`;
+      if(ouvert) enf.forEach(c=>{ html += ligne(c, prof+1); });
+      return html;
+    };
+    const corps = b2bs.map(b=>ligne(b,0)).join('');
+    contenu = `<div class="card">
+      ${b2bs.length? `<table class="tbl"><thead><tr><th>Processus</th><th style="width:52px">Niv.</th><th style="width:170px">Domaine</th><th style="width:150px">Référent</th><th style="width:90px">Criticité</th><th style="width:150px">Outil actuel</th><th style="width:120px"></th></tr></thead>
+        <tbody>${corps}</tbody></table>`
+      : '<div class="card__body muted">Aucun bout-en-bout pour ce filtre. Ajoutez le premier pour bâtir le référentiel des processus.</div>'}</div>`;
+  } else {
+    // ---- mode Tableau : toutes les entrées à plat ----
+    const q=procQ.trim().toLowerCase();
+    const chemin=p=>{ const parts=[]; let cur=p; while(cur){ parts.unshift(cur.nom); cur=cur.parentId?state.processus.find(x=>x.id===cur.parentId):null; } return parts.join(' › '); };
+    let list=state.processus.slice()
+      .filter(p=>procDomFiltre==='all'||p.domaineId===procDomFiltre)
+      .filter(p=>procNivFiltre==='all'||p.niveau===procNivFiltre)
+      .filter(p=>!q || (p.code+' '+p.nom).toLowerCase().includes(q) || chemin(p).toLowerCase().includes(q))
+      .sort((a,b)=>(a.code||'').localeCompare(b.code||''));
+    const rows=list.map(p=>{ const dom=domaineById(p.domaineId); const feuille=procEstFeuille(p);
+      return `<tr>
+        <td class="mono muted" style="font-size:10.5px">${esc(p.code)}</td>
+        <td>${niveauDef(p.niveau).court}</td>
+        <td><strong>${esc(p.nom)}</strong>${p.transverse?' <span class="tag">transverse</span>':''}${feuille?' <span class="tag tag--todo">terminal</span>':''}
+          <div class="muted" style="font-size:10.5px">${esc(chemin(p))}</div></td>
+        <td>${dom?`<span class="tag" style="color:${dom.couleur}">${esc(dom.nom)}</span>`:'<span class="muted">—</span>'}</td>
+        <td>${p.referentId?esc(acteurNom(p.referentId)):'<span class="muted">—</span>'}</td>
+        <td>${critTag(p.criticite)}</td>
+        <td>${p.outilActuelId?esc(outilNom(p.outilActuelId)):'<span class="muted">—</span>'}</td>
+        <td><button class="btn btn--sm btn--ghost" data-ed="${p.id}">✎</button></td></tr>`;}).join('');
+    contenu = `<div class="card"><div class="card__head"><h2>${list.length} entrée(s)</h2></div>
+      ${list.length? `<table class="tbl"><thead><tr><th style="width:80px">Code</th><th style="width:52px">Niv.</th><th>Processus</th><th style="width:160px">Domaine</th><th style="width:140px">Référent</th><th style="width:90px">Criticité</th><th style="width:140px">Outil actuel</th><th style="width:44px"></th></tr></thead>
+        <tbody>${rows}</tbody></table>`
+      : '<div class="card__body muted">Aucune entrée ne correspond à ces filtres.</div>'}</div>`;
+  }
+
+  $('#view-processus').innerHTML = `
+    <div class="kpis">${kpis.map(k=>`<div class="kpi"><div class="kpi__k">${k[0]}</div><div class="kpi__v">${esc(k[1])}</div><div class="kpi__n">${esc(k[2])}</div></div>`).join('')}</div>
+    ${barre}${contenu}`;
+
+  $('#pr_mode').onclick=e=>{ const b=e.target.closest('[data-pm]'); if(b){ procMode=b.dataset.pm; renderProcessus(); } };
+  $('#pr_domf').onchange=e=>{ procDomFiltre=e.target.value; renderProcessus(); };
+  const nf=$('#pr_nivf'); if(nf) nf.onchange=e=>{ procNivFiltre=e.target.value; renderProcessus(); };
+  const q=$('#pr_q'); if(q) q.oninput=e=>{ procQ=e.target.value; renderProcessus(); const n=$('#pr_q'); if(n){ n.focus(); n.setSelectionRange(n.value.length,n.value.length); } };
+  $('#pr_addb2b').onclick=()=>editProcessus(null,{niveau:'b2b',parentId:null});
+  const ex=$('#pr_expand'); if(ex) ex.onclick=()=>{ state.processus.forEach(p=>{ if(!procEstFeuille(p)) procOuvert.add(p.id); }); renderProcessus(); };
+  const co=$('#pr_collapse'); if(co) co.onclick=()=>{ procOuvert.clear(); renderProcessus(); };
+  $('#pr_csv').onclick=()=>exportProcessusCSV();
+  $('#view-processus').querySelectorAll('[data-toggle]').forEach(b=>b.onclick=()=>{ const id=b.dataset.toggle; procOuvert.has(id)?procOuvert.delete(id):procOuvert.add(id); renderProcessus(); });
+  $('#view-processus').querySelectorAll('[data-ed]').forEach(b=>b.onclick=()=>editProcessus(b.dataset.ed));
+  $('#view-processus').querySelectorAll('[data-add]').forEach(b=>b.onclick=()=>{ const par=state.processus.find(x=>x.id===b.dataset.add); if(par) editProcessus(null,{niveau:niveauDef(par.niveau).enfant,parentId:par.id,domaineId:par.domaineId}); });
+}
+function exportProcessusCSV(){
+  const rows=[];
+  const walk=(p,chemin)=>{
+    const c=chemin? chemin+' > '+p.nom : p.nom;
+    rows.push([niveauDef(p.niveau).court,p.code,p.nom,c,(domaineById(p.domaineId)||{}).nom||'',
+      p.referentId?acteurNom(p.referentId):'',p.criticite||'',outilNom(p.outilActuelId),
+      p.transverse?'Oui':'Non',procEstFeuille(p)?'Oui':'Non']);
+    procEnfants(p).sort((a,b)=>(a.code||'').localeCompare(b.code||'')).forEach(e=>walk(e,c));
+  };
+  state.processus.filter(p=>p.niveau==='b2b').sort((a,b)=>(a.code||'').localeCompare(b.code||'')).forEach(b=>walk(b,''));
+  downloadCSV('processus',['Niveau','Code','Libellé','Chemin complet','Domaine métier','Référent','Criticité','Outil actuel','Transverse','Terminal'],rows);
 }
 
 /* ============================================================
@@ -3268,6 +3650,7 @@ function fieldValue(f,row){ return row? row[f.k] : (f.def!==undefined?f.def:(f.t
 
 function refName(f,v){ const arr=state[f.refStore]||[]; const o=arr.find(x=>x.id===v); return o?(o[f.refLabel||'nom']||''):''; }
 function cellRender(f,v,row,cfg){
+  if(f.type==='calc') return f.calc(row);
   if(v===undefined||v===null||v==='') { if(f.type==='bool') v=false; else return '<span class="muted">—</span>'; }
   switch(f.type){
     case 'acteur': return esc(acteurNom(v));
@@ -3307,7 +3690,7 @@ function fieldInput(f,val){
 function editRegItem(cfg,id,defaults={}){
   const list=regList(cfg);
   const row = id? list.find(x=>x.id===id) : {...Object.fromEntries(cfg.champs.map(f=>[f.k,fieldValue(f,null)])),...defaults};
-  const corps = `<div class="regform">${cfg.champs.map(f=>
+  const corps = `<div class="regform">${cfg.champs.filter(f=>f.type!=='calc').map(f=>
     `<label class="f ${f.full||f.type==='textarea'?'full':''}"><span>${esc(f.label)}${f.required?' *':''}</span>${fieldInput(f,row[f.k])}</label>`).join('')}
     ${id?`<p class="hint full" style="margin:2px 0 0">Dernière modification : ${fmtDT(row.maj)}${row.creeLe?' · créé le '+fmtFR(row.creeLe):''}</p>`:''}</div>`;
   modal({titre:(id?'Modifier — ':'Nouveau — ')+cfg.single, corps,
@@ -3386,6 +3769,7 @@ function exportRegisterCSV(cfg,filter){
   let items=regList(cfg).slice(); if(filter) items=items.filter(filter);
   const cols=cfg.champs;
   const val=(f,r)=>{ const v=r[f.k];
+    if(f.type==='calc') return f.calcTxt? f.calcTxt(r) : '';
     if(f.type==='acteur') return acteurNom(v);
     if(f.type==='domaine'){ const d=state.domaines.find(x=>x.id===v); return d?d.nom:''; }
     if(f.type==='ref') return refName(f,v)||r[f.fallback]||'';
@@ -3437,13 +3821,16 @@ function collectItems(){
   const push=(o)=>out.push(o);
   state.taches.filter(t=>t.responsableId&&!estParent(t.id)).forEach(t=>{const r=rollup(t);
     push({type:t.type==='jalon'?'Jalon':'Tâche projet',vue:'gantt',titre:t.nom,responsableId:t.responsableId,
-      echeance:r.fin,criticite:t.type==='jalon'?'Critique':'Majeur',statut:t.statut,assigneLe:t.maj||t.creeLe,domaineId:null,phaseId:t.phaseId});});
+      echeance:r.fin,criticite:t.type==='jalon'?'Critique':'Majeur',statut:t.statut,assigneLe:t.maj||t.creeLe,domaineId:t.domaineId||null,phaseId:t.phaseId});});
   state.actions.forEach(a=>push({type:"Action du plan",vue:'plan',titre:a.titre,responsableId:a.responsableId,
     echeance:a.echeance,criticite:({h:'Critique',m:'Majeur',b:'Mineur'})[a.priorite]||'Majeur',statut:a.statut,assigneLe:a.assigneLe||a.creeLe,domaineId:null}));
   state.transformations.forEach(t=>push({type:"Impact organisation",vue:'transfo',titre:t.titre,responsableId:t.responsableId,
     echeance:t.echeance,criticite:({Fort:'Critique',Moyen:'Majeur',Faible:'Mineur'})[t.impact]||'Majeur',statut:t.statut,assigneLe:t.maj,domaineId:t.domaineId}));
-  state.processus.forEach(p=>push({type:"Processus à valider",vue:'perimetre',titre:p.code+' · '+p.nom,responsableId:p.responsableId,
-    echeance:null,criticite:p.criticite,statut:p.statut==='copil'||p.statut==='metier'?'fait':(p.statut==='non'||p.statut==='hors'?'na':'cours'),assigneLe:p.maj,domaineId:p.domaineId}));
+  // Seuls les processus terminaux (feuilles) portent référent et suivi ; on les
+  // remonte au tableau de bord de leur référent. Criticité H/M/B -> échelle interne.
+  const critMap={Haute:'Critique',Moyenne:'Majeur',Basse:'Mineur'};
+  state.processus.filter(p=>p.referentId && procEstFeuille(p)).forEach(p=>push({type:"Processus (conception)",vue:'processus',titre:p.code+' · '+p.nom,responsableId:p.referentId,
+    echeance:null,criticite:critMap[p.criticite]||'Majeur',statut:'cours',assigneLe:p.maj,domaineId:p.domaineId}));
   (state.demandes||[]).forEach(d=>push({type:"Demande",vue:'demandes',titre:d.titre,responsableId:d.responsableId,
     echeance:d.echeance,criticite:d.criticite,statut:d.statut,assigneLe:d.assigneLe||d.creeLe,domaineId:d.domaineId}));
   (state.roles||[]).forEach(r=>push({type:"Rôle de sécurité",vue:'roles',titre:r.nom,responsableId:r.responsableId,
@@ -3459,6 +3846,9 @@ function collectItems(){
    CONFIGURATIONS DE REGISTRES
    ============================================================ */
 const CRIT3=['Critique','Majeur','Mineur'];
+// Poids pour la criticité calculée des risques (probabilité × impact) — lot 1b.
+const PROBA_POIDS={Faible:1,Moyenne:2,Forte:3};
+const IMPACT_POIDS={Faible:1,Moyen:2,Majeur:3};
 Object.assign(REG,{
   commGroupes:{store:'commGroupes',prefix:'cg',single:'groupe de communication',addLabel:'Ajouter un groupe',respKey:'responsableId',
     champs:[
@@ -3599,7 +3989,32 @@ Object.assign(REG,{
       {k:'fin',label:'Fin',type:'date',w:'104px'},
       {k:'responsableId',label:'Responsable',type:'acteur'},
       {k:'statut',label:'Statut',type:'statut',w:'112px'},
-      {k:'commentaire',label:'Commentaire',type:'textarea',hideCol:true}]}
+      {k:'commentaire',label:'Commentaire',type:'textarea',hideCol:true}]},
+  risques:{store:'risques',prefix:'rq',single:'risque',addLabel:'Déclarer un risque',groupBy:'statut',groupLabel:'Tous statuts',
+    champs:[
+      {k:'libelle',label:'Risque',type:'text',required:true,main:true,w:'260px',ph:'Ex. Retard de reprise des données stocks'},
+      {k:'probabilite',label:'Probabilité',type:'select',options:['Faible','Moyenne','Forte'],w:'100px'},
+      {k:'impact',label:'Impact',type:'select',options:['Faible','Moyen','Majeur'],w:'100px'},
+      {k:'criticite',label:'Criticité',type:'calc',w:'130px',
+        calc:r=>{ const c=(PROBA_POIDS[r.probabilite]||0)*(IMPACT_POIDS[r.impact]||0);
+          if(!c) return '<span class="muted">—</span>';
+          const niv = c>=6?{cls:'tag--late',l:'Élevée'}:(c>=3?{cls:'tag--run',l:'Modérée'}:{cls:'tag--todo',l:'Faible'});
+          return `<span class="tag ${niv.cls}">${niv.l}</span>`; },
+        calcTxt:r=>{ const c=(PROBA_POIDS[r.probabilite]||0)*(IMPACT_POIDS[r.impact]||0);
+          return c? (c>=6?'Élevée':(c>=3?'Modérée':'Faible')) : ''; }},
+      {k:'statut',label:'Statut',type:'select',options:['Ouvert','Maîtrisé','Clos'],w:'110px'},
+      {k:'echeance',label:'Échéance',type:'date',w:'104px'},
+      {k:'description',label:'Description',type:'textarea',full:true,hideCol:true},
+      {k:'planMitigation',label:'Plan de mitigation',type:'textarea',full:true,hideCol:true}]},
+  decisions:{store:'decisions',prefix:'dc',single:'décision',addLabel:'Ajouter une décision',groupBy:'statut',groupLabel:'Tous statuts',
+    champs:[
+      {k:'libelle',label:'Décision',type:'text',required:true,main:true,w:'280px',ph:'Ex. Validation du périmètre de reprise Finance'},
+      {k:'instanceDecisionnaire',label:'En attente de',type:'select',options:['Sponsor','Direction de projet','COPIL'],w:'150px'},
+      {k:'statut',label:'Statut',type:'select',options:['En attente','Prise','Reportée'],w:'110px'},
+      {k:'echeance',label:'Échéance souhaitée',type:'date',w:'120px'},
+      {k:'dateDecision',label:'Date de décision',type:'date',w:'120px'},
+      {k:'contexte',label:'Contexte',type:'textarea',full:true,hideCol:true},
+      {k:'resultat',label:'Résultat / arbitrage',type:'textarea',full:true,hideCol:true}]}
 });
 
 /* ============================================================
@@ -3651,9 +4066,18 @@ function seedExtra(A,domaines){
     {typeDonnee:'Soldes et écritures comptables',donneeId:dId('Soldes et écritures comptables'),action:'Reprise des balances',debut:'2027-12-27',fin:'2027-12-30',responsableId:A(7),statut:'na',commentaire:''}]);
   const repetitions=stamp([
     {serie:'Répétition 1',action:'Reprise à blanc complète',typeDonnee:'Tous',debut:'2027-10-04',fin:'2027-10-15',responsableId:A(11),resultat:'Non démarré',statut:'na',constats:''}]);
+  const risques=stamp([
+    {libelle:'Retard de reprise des données stocks',probabilite:'Moyenne',impact:'Majeur',statut:'Ouvert',echeance:'2027-11-15',
+      description:'La fiabilisation des stocks avant bascule dépend d\'un inventaire physique non encore planifié.',planMitigation:'Caler la date d\'inventaire avec la Supply Chain avant fin de trimestre.'},
+    {libelle:'Indisponibilité des key users Finance pendant la clôture annuelle',probabilite:'Forte',impact:'Moyen',statut:'Ouvert',echeance:'2026-12-01',
+      description:'La période de clôture comptable annuelle chevauche les ateliers de conception prévus.',planMitigation:'Décaler les ateliers Finance de deux semaines.'}]);
+  const decisions=stamp([
+    {libelle:'Validation du périmètre de reprise des commandes ouvertes',instanceDecisionnaire:'Sponsor',statut:'En attente',echeance:'2027-10-01',
+      contexte:'Arbitrer entre reprise intégrale ou reprise des seules commandes non soldées à J-30.',resultat:''}]);
   return {commGroupes,evenements,regles,budget,realisation,demandes,documents,attendus,roles,boutEnBout,planBascule,bascule,repetitions,
     photos:[], budgetVersions:[], charte:{texte:CHARTE_DEFAUT,maj:nowStamp()}, testStrategie:{texte:STRAT_DEFAUT,maj:nowStamp()},
-    campagnes:seedCampagnes(A,_donnees), donnees:_donnees};
+    statutProjet:{messageAvancement:'',statutOverride:null,maj:nowStamp()},
+    campagnes:seedCampagnes(A,_donnees), donnees:_donnees, risques, decisions};
 }
 const CHARTE_DEFAUT = `Le projet de renouvellement de l'ERP engage l'ensemble des directions. Chaque acteur s'engage à :
 • donner la priorité aux sollicitations du projet dans les délais de réactivité convenus ;
@@ -3929,6 +4353,78 @@ function renderContrat(){
 /* ============================================================
    TABLEAU DE BORD — mes éléments
    ============================================================ */
+/* ============================================================
+   MON DOMAINE — tableau de bord Contributeur — lot 4
+   Rassemble ce qui était dispersé : mes actions (déjà dans Mes éléments),
+   avancement de mon domaine (déjà dans Plan d'action > Par domaine, filtré
+   par défaut sur mon domaine), ma charge (déjà dans Plan de charge) et mes
+   échéances proches — sur un seul écran, avec des liens directs vers le
+   détail plutôt que de dupliquer les écrans sources.
+   ============================================================ */
+function renderMonDomaine(){
+  const me = monActeurId();
+  if(!me){
+    $('#view-mondomaine').innerHTML = `<div class="card"><div class="card__body muted">
+      Votre compte n'est rattaché à aucun acteur du projet — demandez à un administrateur de le faire dans Utilisateurs et rôles pour afficher votre tableau de bord.</div></div>`;
+    return;
+  }
+  const acteur = acteurById(me);
+  const domId = acteur? acteur.domainePrincipalId : null;
+  const dom = domId? domaineById(domId) : null;
+
+  const items = collectItems().filter(i=>i.responsableId===me);
+  const ouverts = items.filter(i=>!STAT_DONE.has(i.statut));
+  const retard = ouverts.filter(i=>i.echeance && i.echeance<today());
+  const echeances = ouverts.filter(i=>i.echeance).sort((a,b)=>a.echeance.localeCompare(b.echeance)).slice(0,8);
+
+  const actionsDom = domId? state.actions.filter(a=>domaineDeAction(a)===domId) : [];
+  const tachesDom = domId? state.taches.filter(t=>t.domaineId===domId && !estParent(t.id) && t.type!=='jalon') : [];
+  const avList = [...actionsDom.map(a=>a.avancement||0), ...tachesDom.map(t=>t.avancement||0)];
+  const avgDom = avList.length? Math.round(avList.reduce((s,v)=>s+v,0)/avList.length) : 0;
+  const retardDom = actionsDom.filter(a=>a.statut!=='fait'&&a.echeance&&a.echeance<today()).length
+                   + tachesDom.filter(t=>t.statut!=='fait'&&t.fin&&t.fin<today()).length;
+
+  const h = horizon();
+  const moisAVenir = monthsRange(today()<h.debut?h.debut:today(), h.fin).slice(0,4);
+  const cp = state.chargePrevue||{};
+  const chargeMois = moisAVenir.map(k=>({
+    k, charge: Number(cp[me+'|'+k])||0,
+    capacite: Math.max(0, Math.round((workdaysInMonth(k)*dispoPct(me,k)/100 - joursAbsence(me,k))*10)/10)
+  }));
+  const cCour = chargeMois[0] || {k:today().slice(0,7), charge:0, capacite:0};
+
+  const kpis = [
+    ['Avancement de mon domaine', dom? avgDom+' %' : '—', dom? `${actionsDom.length+tachesDom.length} élément(s) · ${retardDom} en retard` : 'Aucun domaine principal renseigné sur votre fiche'],
+    ['Mes actions ouvertes', String(ouverts.length), `${items.length-ouverts.length} terminée(s) au total`],
+    ['Dont en retard', String(retard.length), retard.length? 'à traiter en priorité' : 'aucune, à jour'],
+    ['Charge planifiée — '+monthLabel(cCour.k), cCour.charge.toLocaleString('fr-FR')+' j', cCour.capacite? Math.round(cCour.charge/cCour.capacite*100)+' % de la capacité du mois' : 'capacité non renseignée']
+  ];
+
+  $('#view-mondomaine').innerHTML = `
+    <div class="kpis">${kpis.map(k=>`<div class="kpi"><div class="kpi__k">${k[0]}</div><div class="kpi__v">${esc(k[1])}</div><div class="kpi__n">${esc(k[2])}</div></div>`).join('')}</div>
+    <div class="card"><div class="card__head"><h2>Mes actions et tâches</h2><span class="section__count">${ouverts.length} ouvertes</span></div>
+      ${echeances.length? `<table class="tbl"><thead><tr><th>Élément</th><th style="width:130px">Type</th><th style="width:112px">Statut</th><th style="width:104px">Échéance</th><th style="width:60px"></th></tr></thead>
+      <tbody>${echeances.map(i=>{const late=i.echeance&&i.echeance<today();
+        return `<tr><td>${esc(i.titre)}</td><td class="muted">${esc(i.type)}</td>
+          <td><span class="tag ${statutDef(i.statut).cls}">${statutDef(i.statut).nom}</span></td>
+          <td class="mono ${late?'overdue':''}">${fmtFR(i.echeance)}</td>
+          <td><button class="btn btn--sm btn--ghost" data-goto="${i.vue}">Ouvrir</button></td></tr>`;}).join('')}</tbody></table>`
+      : '<div class="card__body muted">Aucune action ouverte qui vous soit attribuée.</div>'}</div>
+    <div class="card"><div class="card__head"><h2>${dom?esc(dom.nom):'Mon domaine'}</h2>
+      ${dom?'<button class="btn btn--sm btn--ghost" id="md_voirdom">Voir toutes les actions du domaine</button>':''}</div>
+      <div class="card__body">${dom
+        ? `<p class="hint" style="margin:0">${actionsDom.length} action(s) et ${tachesDom.length} tâche(s) WBS rattachées à ce domaine, tous responsables confondus — avancement moyen ${avgDom} %, ${retardDom} en retard.</p>`
+        : `<p class="hint" style="margin:0">Aucun domaine principal n'est renseigné sur votre fiche acteur — demandez à un administrateur de le compléter pour voir l'avancement de votre périmètre.</p>`}</div></div>
+    <div class="card"><div class="card__head"><h2>Ma charge planifiée</h2>
+      <button class="btn btn--sm btn--ghost" id="md_voircharge">Voir mon plan de charge</button></div>
+      <table class="tbl"><thead><tr>${chargeMois.map(m=>`<th>${monthLabel(m.k)}</th>`).join('')}</tr></thead>
+        <tbody><tr>${chargeMois.map(m=>`<td class="mono">${m.charge.toLocaleString('fr-FR')} j${m.capacite?' / '+m.capacite+' j':''}</td>`).join('')}</tr></tbody></table>
+      <div class="card__body" style="padding-top:8px"><p class="hint" style="margin:0">Charge planifiée / capacité disponible (jours ouvrés × disponibilité − absences déclarées).</p></div></div>`;
+
+  $('#view-mondomaine').querySelectorAll('[data-goto]').forEach(b=>b.onclick=()=>go(b.dataset.goto));
+  const vd=$('#md_voirdom'); if(vd) vd.onclick=()=>{ subtabState['plan']='domaine'; go('plan'); };
+  const vc=$('#md_voircharge'); if(vc) vc.onclick=()=>{ subtabState['acteurs']='charge'; go('acteurs'); };
+}
 let tdbScope={mode:'indiv',acteurId:null,domaineId:null};
 function renderTDB(){
   if(!tdbScope.acteurId) tdbScope.acteurId=(state.acteurs.find(a=>a.actif)||{}).id;
@@ -4206,6 +4702,7 @@ function renderPatrimoine(m){
       <button class="btn btn--primary" id="cp_add" style="margin-left:auto">Nouvelle campagne de tests</button></div></div>
     ${camp?`<div class="card"><div class="card__head"><h2>${esc(camp.nom)}</h2>
         <span class="section__count">${camp.debut?fmtFR(camp.debut)+' → '+fmtFR(camp.fin):''}</span>
+        ${camp.domaineId?(()=>{const d=domaineById(camp.domaineId);return d?`<span class="tag" style="color:${d.couleur}">${esc(d.nom)}</span>`:'';})():''}
         <button class="btn btn--sm btn--ghost" id="cp_ed">Modifier la campagne</button>
         <button class="btn btn--sm btn--ghost btn--danger" id="cp_del">Supprimer</button>
         <button class="btn btn--sm" id="ts_csv">CSV</button>
@@ -4237,15 +4734,16 @@ function renderPatrimoine(m){
   }
 }
 function editCampagne(id){
-  const c=id?state.campagnes.find(x=>x.id===id):{nom:'',objectif:'',debut:'',fin:'',statut:'na'};
+  const c=id?state.campagnes.find(x=>x.id===id):{nom:'',objectif:'',debut:'',fin:'',statut:'na',domaineId:null};
   modal({titre:id?'Modifier la campagne':'Nouvelle campagne de tests',
     corps:`<label class="f"><span>Nom de la campagne</span><input type="text" id="k_n" value="${esc(c.nom)}" placeholder="Ex. Campagne de test 2"></label>
       <label class="f"><span>Objectif</span><textarea id="k_o">${esc(c.objectif||'')}</textarea></label>
       <div class="grid3"><label class="f"><span>Début</span><input type="date" id="k_d" value="${c.debut||''}"></label>
       <label class="f"><span>Fin</span><input type="date" id="k_f" value="${c.fin||''}"></label>
-      <label class="f"><span>Statut</span><select id="k_s">${optStatuts(c.statut)}</select></label></div>`,
+      <label class="f"><span>Statut</span><select id="k_s">${optStatuts(c.statut)}</select></label></div>
+      <label class="f"><span>Domaine</span><select id="k_dom"><option value="">— Transverse / non affecté —</option>${state.domaines.slice().sort((x,y)=>x.ordre-y.ordre).map(d=>`<option value="${d.id}" ${c.domaineId===d.id?'selected':''}>${esc(d.nom)}</option>`).join('')}</select></label>`,
     onOk(r){ const nom=$('#k_n',r).value.trim(); if(!nom){toast('Indiquez un nom.');return false;}
-      const o={nom,objectif:$('#k_o',r).value,debut:$('#k_d',r).value,fin:$('#k_f',r).value,statut:$('#k_s',r).value,maj:nowStamp()};
+      const o={nom,objectif:$('#k_o',r).value,debut:$('#k_d',r).value,fin:$('#k_f',r).value,statut:$('#k_s',r).value,domaineId:$('#k_dom',r).value||null,maj:nowStamp()};
       const isNew=!id;
       const target = id? Object.assign({}, c, o) : Object.assign({id:uid('cp'),creeLe:today(),tests:[]}, o);
       if(isNew) selCampagne=target.id;
@@ -4336,6 +4834,8 @@ function renderRepetitions(){
   })));
 }
 function renderPlanBascule(){ renderRegister(REG.planBascule,'#view-planbascule'); }
+function renderRisques(){ renderRegister(REG.risques,'#view-risques',{toolbarExtra:'<p class="hint" style="margin:0">Objet autonome — non rattaché à un domaine ni au reste du graphe. Alimente la vue Sponsor (lot 3) par son statut propre.</p>'}); }
+function renderDecisions(){ renderRegister(REG.decisions,'#view-decisions',{toolbarExtra:'<p class="hint" style="margin:0">Objet autonome — le champ « En attente de » indique qui doit trancher et alimente la liste « décisions qui vous attendent » de la vue Sponsor (lot 3).</p>'}); }
 
 async function renderUsersCard(){
   const mount=$('#ad_users'); if(!mount) return;
@@ -4498,7 +4998,10 @@ async function startApp(){
   try{
     await loadState();
     const me=monActeurId(); if(me && typeof tdbScope!=='undefined') tdbScope.acteurId=me;
-    ensureViews(); buildNav(); initIO(); go('dashboard'); applyRoleUI();
+    const pop = maPopulation();
+    railFull = !pop || pop==='direction'; // direction garde le rail complet d'emblée ; les autres populations démarrent en vue réduite
+    const landing = pop? (POP_LANDING[pop]||'dashboard') : 'dashboard';
+    ensureViews(); buildNav(); initIO(); go(landing); applyRoleUI();
     if(PERSIST.mode==='cloud' && DB.subscribe) DB.subscribe(applyRealtime);
     if(PERSIST.mode==='cloud') chargerProfilsCache();
     if(PERSIST.mode==='cloud' && !me) toast('Votre compte n\'est rattaché à aucun acteur du projet — demandez à un administrateur de le faire dans Utilisateurs et rôles.');
